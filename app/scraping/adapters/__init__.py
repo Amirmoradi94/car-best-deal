@@ -1,0 +1,2 @@
+"""Marketplace source adapters."""
+
