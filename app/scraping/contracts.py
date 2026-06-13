@@ -99,5 +99,8 @@ class ListingSourceAdapter:
     async def fetch_listing(self, ref: SourceListingRef) -> SourceSnapshot:
         raise NotImplementedError
 
+    def parse_search_listings(self, source: str, limit: int = 25) -> list[ParsedListing]:
+        raise NotImplementedError
+
     async def parse_listing(self, snapshot: SourceSnapshot) -> ParsedListing:
         raise NotImplementedError

@@ -31,7 +31,7 @@ def create_search(payload: SearchCreateRequest) -> dict:
 @router.post("/{search_id}/run", response_model=SearchRunResponse)
 async def run_search(search_id: str) -> SearchRunResponse:
     pipeline = SearchPipeline()
-    scored_items = await pipeline.run_kijiji_batch_search(
+    scored_items = await pipeline.run_multi_source_batch_search(
         SearchFilters(make="Honda", model="Civic", year_min=2020, limit=25)
     )
     return SearchRunResponse(

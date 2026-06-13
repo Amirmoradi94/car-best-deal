@@ -3,8 +3,9 @@ from __future__ import annotations
 from app.core.config import Settings
 from app.domain.enums import RiskTolerance, SellerType
 from app.domain.models import ComparableListing, DealerSettings, ListingSnapshot, VehicleProfile
+from app.scraping.adapters.autotrader import AutoTraderAdapter
 from app.scraping.adapters.kijiji import KijijiAdapter
-from app.scraping.contracts import ParsedListing, SearchFilters
+from app.scraping.contracts import ListingSourceAdapter, ParsedListing, SearchFilters
 from app.scraping.zyte_client import ZyteClient
 from app.services.pricing import calculate_pricing, score_and_attach_comparables
 from app.services.relevance import infer_search_intent, score_listing_relevance
@@ -18,21 +19,48 @@ class SearchPipeline:
         if not self.settings.scraping_fixture_mode and self.settings.zyte_api_key:
             zyte_client = ZyteClient(api_key=self.settings.zyte_api_key, api_url=self.settings.zyte_api_url)
         self.kijiji = KijijiAdapter(self.settings, zyte_client=zyte_client)
+        self.autotrader = AutoTraderAdapter(self.settings, zyte_client=zyte_client)
 
     async def run_fixture_backed_search(self, filters: SearchFilters):
-        return await self.run_kijiji_batch_search(filters)
+        return await self.run_multi_source_batch_search(filters)
 
     async def run_kijiji_batch_search(self, filters: SearchFilters):
-        snapshot = await self.kijiji.fetch_search_snapshot(filters)
-        parsed_listings = self.kijiji.parse_search_listings(snapshot.html, limit=filters.limit)
+        parsed_listings = await self._fetch_source_listings(self.kijiji, filters)
+        return self._rank_parsed_listings(parsed_listings, filters, prefix_listing_ids=False)
+
+    async def run_autotrader_batch_search(self, filters: SearchFilters):
+        parsed_listings = await self._fetch_source_listings(self.autotrader, filters)
+        return self._rank_parsed_listings(parsed_listings, filters, prefix_listing_ids=False)
+
+    async def run_multi_source_batch_search(self, filters: SearchFilters):
+        parsed_listings: list[ParsedListing] = []
+        for adapter in (self.kijiji, self.autotrader):
+            parsed_listings.extend(await self._fetch_source_listings(adapter, filters))
+        return self._rank_parsed_listings(parsed_listings, filters, prefix_listing_ids=True)
+
+    async def _fetch_source_listings(
+        self,
+        adapter: ListingSourceAdapter,
+        filters: SearchFilters,
+    ) -> list[ParsedListing]:
+        snapshot = await adapter.fetch_search_snapshot(filters)
+        return adapter.parse_search_listings(snapshot.html, limit=filters.limit)
+
+    def _rank_parsed_listings(
+        self,
+        parsed_listings: list[ParsedListing],
+        filters: SearchFilters,
+        prefix_listing_ids: bool,
+    ):
         listing_snapshots = [
             parsed_listing_to_listing_snapshot(
                 parsed,
-                listing_id=parsed.raw_fields.get("source_listing_id") or parsed.url,
+                listing_id=_listing_id_for_parsed(parsed, prefix_listing_ids),
             )
             for parsed in parsed_listings
             if parsed.asking_price_cad is not None and parsed.asking_price_cad.value is not None
         ]
+        listing_snapshots = _dedupe_listing_snapshots(listing_snapshots)
         intent = infer_search_intent(filters)
         relevance_by_listing = {
             listing.id: score_listing_relevance(listing, intent)
@@ -129,3 +157,20 @@ def listing_snapshot_to_comparable(listing: ListingSnapshot) -> ComparableListin
 
 def _value(field):
     return field.value if field is not None else None
+
+
+def _listing_id_for_parsed(parsed: ParsedListing, prefix_listing_ids: bool) -> str:
+    raw_id = parsed.raw_fields.get("source_listing_id") or parsed.url
+    return f"{parsed.source_name}:{raw_id}" if prefix_listing_ids else raw_id
+
+
+def _dedupe_listing_snapshots(listings: list[ListingSnapshot]) -> list[ListingSnapshot]:
+    deduped: list[ListingSnapshot] = []
+    seen: set[tuple[str, str]] = set()
+    for listing in listings:
+        key = (listing.source_name, listing.url or listing.id)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(listing)
+    return deduped

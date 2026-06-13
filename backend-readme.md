@@ -44,6 +44,9 @@ Milestone 2 has also started:
 - Search pipeline that converts parsed listings into scored opportunities.
 - Kijiji same-batch ranking using parsed search-result listings as comparables.
 - Query relevance filtering so off-query Kijiji results do not rank as first-class opportunities.
+- AutoTrader adapter with synthetic and live fixture coverage.
+- Combined Kijiji + AutoTrader batch ranking using same-batch comparables across both sources.
+- AutoTrader live smoke CLI with search and first-listing detail fixture capture.
 
 The app defaults to fixture scraping mode. To prepare for live Zyte-backed fetching, copy `.env.example` to `.env`, set `ZYTE_API_KEY`, and set:
 
@@ -52,11 +55,11 @@ SCRAPING_FIXTURE_MODE=false
 SCRAPING_USE_ZYTE=true
 ```
 
-Live AutoTrader coverage, production-grade Kijiji selectors, Gemini calls, Alembic migrations, and real PostgreSQL wiring are intentionally not implemented yet.
+Production-grade Kijiji selectors, Gemini calls, Alembic migrations, and real PostgreSQL wiring are intentionally not implemented yet.
 
-## Kijiji Batch Ranking
+## Combined Batch Ranking
 
-The search pipeline can rank parsed Kijiji search results directly:
+The search pipeline can rank parsed Kijiji and AutoTrader search results together:
 
 ```bash
 uv run python - <<'PY'
@@ -65,7 +68,7 @@ from app.scraping.contracts import SearchFilters
 import asyncio
 
 async def main():
-    results = await SearchPipeline().run_kijiji_batch_search(
+    results = await SearchPipeline().run_multi_source_batch_search(
         SearchFilters(query="2020 Honda Civic Montreal", limit=5)
     )
     for item in results:
@@ -75,11 +78,13 @@ asyncio.run(main())
 PY
 ```
 
-In fixture mode, this uses saved HTML fixtures. In live mode, it fetches Kijiji through Zyte, parses JSON-LD listing data, builds same-batch comparables, and returns ranked opportunities.
+In fixture mode, this uses saved HTML fixtures. In live mode, it fetches Kijiji and AutoTrader through Zyte, parses listing data, builds same-batch comparables, and returns ranked opportunities.
 
 The pipeline now filters parsed search results by relevance to the requested year/make/model/query. For example, a search for `2020 Honda Civic Montreal` will filter unrelated Kia/Mazda/Volkswagen results before ranking. Borderline matches can be kept with a deal-score penalty; clearly off-query listings are removed from the scored opportunity list.
 
-## Kijiji Scraping Smoke Command
+## Scraping Smoke Commands
+
+### Kijiji
 
 Run safely against local fixtures:
 
@@ -110,3 +115,28 @@ uv run python -m app.cli.scrape_kijiji \
 ```
 
 The command saves raw snapshots through the local object store. By default, object data is written under `var/object-store`, which is ignored by git.
+
+### AutoTrader
+
+Run safely against local fixtures:
+
+```bash
+uv run python -m app.cli.scrape_autotrader "2020 Honda Civic Montreal" --fixture-mode
+```
+
+Run live through Zyte after configuring `.env`:
+
+```bash
+uv run python -m app.cli.scrape_autotrader "2020 Honda Civic Montreal" --limit 20
+```
+
+Save live AutoTrader HTML into parser fixtures:
+
+```bash
+uv run python -m app.cli.scrape_autotrader \
+  "2020 Honda Civic Montreal" \
+  --limit 20 \
+  --save-search-fixture fixtures/html/autotrader/search_results_live.html \
+  --fetch-first-listing \
+  --save-listing-fixture fixtures/html/autotrader/listing_detail_live.html
+```
