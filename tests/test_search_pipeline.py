@@ -3,8 +3,10 @@ from pathlib import Path
 import pytest
 
 from app.core.config import Settings
+from app.domain.enums import SellerType
 from app.scraping.errors import SourceFailureDetail, SourceFailureReason, SourceScrapingError
-from app.scraping.contracts import SearchFilters, SourceSnapshot
+from app.scraping.contracts import FieldValue, ParsedListing, SearchFilters, SourceSnapshot
+from app.services.ai_extraction import AIExtractionService
 from app.services.image_risk import DeterministicImageRiskAnalyzer, GeminiImageRiskAnalyzer
 from app.services.search_pipeline import SearchPipeline
 
@@ -205,6 +207,42 @@ async def test_single_listing_analysis_scores_kijiji_url_against_comparables() -
     assert scored.listing.has_image_risk is True
     assert scored.pricing.comparable_count >= 1
     assert scored.relevance_reasons == ("single_listing_url",)
+
+
+@pytest.mark.asyncio
+async def test_single_listing_analysis_uses_ai_listing_fallback_for_low_confidence_parse(tmp_path) -> None:
+    settings = Settings(SCRAPING_FIXTURE_MODE=True, OBJECT_STORE_ROOT=str(tmp_path / "objects"))
+    pipeline = SearchPipeline(settings, ai_extractor=AIExtractionService(settings))
+
+    async def low_confidence_parse(snapshot):
+        return ParsedListing(
+            source_name="kijiji",
+            url=snapshot.url,
+            title=FieldValue("2020 Honda Civic accident special", 0.45),
+            year=FieldValue(2020, 0.6),
+            make=FieldValue("Honda", 0.6),
+            model=FieldValue("Civic", 0.6),
+            description=FieldValue("Accident claim listed. Asking $12,450 CAD. Mileage 82,100 km.", 0.5),
+            seller_type=SellerType.PRIVATE,
+            extraction_confidence=0.45,
+        )
+
+    pipeline.kijiji.parse_listing = low_confidence_parse
+
+    results = await pipeline.run_single_listing_analysis(
+        "https://www.kijiji.ca/v-cars-trucks/montreal/2020-honda-civic-ex/001",
+        SearchFilters(limit=25),
+        sources=("kijiji", "autotrader"),
+    )
+
+    scored = results[0]
+    assert scored.listing.asking_price_cad == 12450
+    assert scored.listing.vehicle.mileage_km == 82100
+    assert "accident_reported" in scored.listing.ai_risk_flags
+    assert {output["feature"] for output in scored.listing.ai_outputs}.issuperset(
+        {"listing_extraction_fallback", "risk_language_detection"}
+    )
+    assert "ai_risk_language:accident_reported" in scored.risk.risk_factors
 
 
 @pytest.mark.asyncio

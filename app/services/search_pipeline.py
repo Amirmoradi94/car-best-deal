@@ -13,6 +13,7 @@ from app.scraping.adapters.kijiji import KijijiAdapter
 from app.scraping.contracts import ListingSourceAdapter, ParsedListing, SearchFilters, SourceListingRef
 from app.services.image_fetcher import CachedImageFetcher
 from app.services.image_risk import DeterministicImageRiskAnalyzer, GeminiImageRiskAnalyzer, ImageRiskResult
+from app.services.ai_extraction import AIExtractionService, AIExtractionResult
 from app.scraping.zyte_client import ZyteClient
 from app.services.pricing import calculate_pricing, score_and_attach_comparables
 from app.services.relevance import infer_search_intent, score_listing_relevance
@@ -54,9 +55,15 @@ class SourceSearchResult:
 
 
 class SearchPipeline:
-    def __init__(self, settings: Settings | None = None, dealer_settings: DealerSettings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        dealer_settings: DealerSettings | None = None,
+        ai_extractor: AIExtractionService | None = None,
+    ) -> None:
         self.settings = settings or Settings()
         self.dealer_settings = dealer_settings
+        self.ai_extractor = ai_extractor
         self.effective_fixture_mode = self._effective_fixture_mode()
         adapter_settings = self.settings.model_copy(
             update={"scraping_fixture_mode": self.effective_fixture_mode}
@@ -431,6 +438,7 @@ class SearchPipeline:
         )
         parsed = await adapter.parse_listing(snapshot)
         detail_listing = parsed_listing_to_listing_snapshot(parsed, listing_id=listing.id)
+        detail_listing = await self._apply_ai_listing_extraction(snapshot, parsed, detail_listing)
         merged = _merge_listing_snapshot(listing, detail_listing)
         image_risk = await self.image_risk_analyzer.analyze(merged, dealer_settings)
         return _apply_image_risk(merged, image_risk)
@@ -448,10 +456,37 @@ class SearchPipeline:
             )
         )
         parsed = await adapter.parse_listing(snapshot)
-        return parsed_listing_to_listing_snapshot(
+        listing = parsed_listing_to_listing_snapshot(
             parsed,
             listing_id=f"{adapter.source_name}:{_source_listing_id_from_url(listing_url)}",
         )
+        return await self._apply_ai_listing_extraction(snapshot, parsed, listing)
+
+    async def _apply_ai_listing_extraction(
+        self,
+        snapshot,
+        parsed,
+        listing: ListingSnapshot,
+    ) -> ListingSnapshot:
+        if self.ai_extractor is None or not _needs_ai_listing_fallback(parsed, listing):
+            return listing
+        result = await self.ai_extractor.listing_fallback(snapshot, parsed, subject_id=listing.id)
+        if result is None:
+            return listing
+        risk_result = await self.ai_extractor.risk_language(
+            subject_type="listing",
+            subject_id=listing.id,
+            text=" ".join(
+                str(value)
+                for value in [
+                    parsed.title.value if parsed.title else None,
+                    parsed.description.value if parsed.description else None,
+                    parsed.raw_fields,
+                ]
+                if value
+            ),
+        )
+        return _apply_ai_listing_result(listing, result, risk_result)
 
     def _score_listing(
         self,
@@ -470,9 +505,11 @@ class SearchPipeline:
         if not same_batch_comparables:
             return None
         comparables = score_and_attach_comparables(listing, same_batch_comparables)
-        pricing = calculate_pricing(listing, comparables, dealer_settings)
-        risk = analyze_risk(listing, dealer_settings)
-        scored_item = score_opportunity(listing, pricing, risk, dealer_settings)
+        comparables, ai_comparable_outputs = self._apply_ai_comparable_relevance(listing, comparables)
+        listing_for_scoring = _append_ai_outputs(listing, ai_comparable_outputs)
+        pricing = calculate_pricing(listing_for_scoring, comparables, dealer_settings)
+        risk = analyze_risk(listing_for_scoring, dealer_settings)
+        scored_item = score_opportunity(listing_for_scoring, pricing, risk, dealer_settings)
         return scored_item.__class__(
             listing=scored_item.listing,
             pricing=scored_item.pricing,
@@ -485,6 +522,39 @@ class SearchPipeline:
             comparables=tuple(comparables),
             confidence_by_section=scored_item.confidence_by_section,
         )
+
+    def _apply_ai_comparable_relevance(
+        self,
+        listing: ListingSnapshot,
+        comparables: list[ComparableListing],
+    ) -> tuple[list[ComparableListing], list[dict]]:
+        if self.ai_extractor is None:
+            return comparables, []
+        outputs: list[dict] = []
+        adjusted: list[ComparableListing] = []
+        target = _listing_ai_payload(listing)
+        for comparable in comparables:
+            comparable_payload = _comparable_ai_payload(comparable)
+            result = self.ai_extractor.comparable_relevance_sync(
+                target=target,
+                comparable=comparable_payload,
+            )
+            if result is None:
+                adjusted.append(comparable)
+                continue
+            output = result.reference()
+            output["parsed_output"] = result.parsed_output
+            outputs.append(output)
+            adjustment = float(result.parsed_output.get("similarity_adjustment") or 0)
+            adjusted.append(
+                ComparableListing(
+                    **{
+                        **comparable.__dict__,
+                        "similarity_score": round(max(0.0, min(1.0, comparable.similarity_score + adjustment)), 4),
+                    }
+                )
+            )
+        return adjusted, outputs
 
     def _adapter_for_source(self, source_name: str) -> ListingSourceAdapter:
         if source_name == self.kijiji.source_name:
@@ -592,6 +662,8 @@ def parsed_listing_to_listing_snapshot(parsed: ParsedListing, listing_id: str) -
         has_history=False,
         has_lien_verification=False,
         image_urls=tuple(image.url for image in parsed.images if image.url),
+        ai_risk_flags=tuple(parsed.raw_fields.get("ai_risk_flags") or ()),
+        ai_outputs=tuple(parsed.raw_fields.get("ai_outputs") or ()),
     )
 
 
@@ -613,6 +685,86 @@ def listing_snapshot_to_comparable(listing: ListingSnapshot) -> ComparableListin
         body_style=listing.vehicle.body_style,
         accident_status=listing.accident_status_claim,
     )
+
+
+def _needs_ai_listing_fallback(parsed: ParsedListing, listing: ListingSnapshot) -> bool:
+    if parsed.extraction_confidence < 0.7:
+        return True
+    vehicle = listing.vehicle
+    return any(
+        value is None
+        for value in [
+            vehicle.year,
+            vehicle.make,
+            vehicle.model,
+            listing.asking_price_cad,
+            vehicle.mileage_km,
+        ]
+    )
+
+
+def _apply_ai_listing_result(
+    listing: ListingSnapshot,
+    result: AIExtractionResult,
+    risk_result: AIExtractionResult | None,
+) -> ListingSnapshot:
+    output = result.parsed_output
+    vehicle = listing.vehicle
+    ai_outputs = [result.reference()]
+    risk_flags = list(output.get("risk_flags") or [])
+    if risk_result is not None:
+        ai_outputs.append(risk_result.reference())
+        risk_flags.extend(risk_result.parsed_output.get("risk_flags") or [])
+    return replace(
+        listing,
+        vehicle=replace(
+            vehicle,
+            year=vehicle.year or _intish(output.get("year")),
+            mileage_km=vehicle.mileage_km or _intish(output.get("mileage_km")),
+        ),
+        asking_price_cad=listing.asking_price_cad or _numberish(output.get("asking_price_cad")),
+        extraction_confidence=max(listing.extraction_confidence, float(output.get("confidence") or 0)),
+        ai_outputs=tuple([*listing.ai_outputs, *ai_outputs]),
+        ai_risk_flags=tuple(dict.fromkeys([*listing.ai_risk_flags, *risk_flags])),
+    )
+
+
+def _append_ai_outputs(listing: ListingSnapshot, outputs: list[dict]) -> ListingSnapshot:
+    if not outputs:
+        return listing
+    return replace(listing, ai_outputs=tuple([*listing.ai_outputs, *outputs]))
+
+
+def _listing_ai_payload(listing: ListingSnapshot) -> dict:
+    return {
+        "id": listing.id,
+        "source_url": listing.url,
+        "source_name": listing.source_name,
+        "year": listing.vehicle.year,
+        "make": listing.vehicle.make,
+        "model": listing.vehicle.model,
+        "trim": listing.vehicle.trim,
+        "mileage_km": listing.vehicle.mileage_km,
+        "asking_price_cad": listing.asking_price_cad,
+        "location_city": listing.location_city,
+        "location_province": listing.location_province,
+    }
+
+
+def _comparable_ai_payload(comparable: ComparableListing) -> dict:
+    return {
+        "id": comparable.id,
+        "source_url": comparable.url,
+        "source_name": comparable.source_name,
+        "year": comparable.year,
+        "make": comparable.make,
+        "model": comparable.model,
+        "trim": comparable.trim,
+        "mileage_km": comparable.mileage_km,
+        "asking_price_cad": comparable.asking_price_cad,
+        "location_city": comparable.location_city,
+        "location_province": comparable.location_province,
+    }
 
 
 def _comparable_filters_for_listing(target: ListingSnapshot, fallback: SearchFilters) -> SearchFilters:
@@ -672,6 +824,24 @@ def _value(field):
     return field.value if field is not None else None
 
 
+def _intish(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(float(str(value).replace(",", "")))
+    except ValueError:
+        return None
+
+
+def _numberish(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except ValueError:
+        return None
+
+
 def _listing_id_for_parsed(parsed: ParsedListing, prefix_listing_ids: bool) -> str:
     raw_id = parsed.raw_fields.get("source_listing_id") or parsed.url
     return f"{parsed.source_name}:{raw_id}" if prefix_listing_ids else raw_id
@@ -708,6 +878,8 @@ def _merge_listing_snapshot(base: ListingSnapshot, detail: ListingSnapshot) -> L
         seller_type=detail.seller_type if detail.seller_type != SellerType.UNKNOWN else base.seller_type,
         extraction_confidence=max(base.extraction_confidence, detail.extraction_confidence),
         image_urls=detail.image_urls or base.image_urls,
+        ai_outputs=tuple([*base.ai_outputs, *detail.ai_outputs]),
+        ai_risk_flags=tuple(dict.fromkeys([*base.ai_risk_flags, *detail.ai_risk_flags])),
     )
 
 

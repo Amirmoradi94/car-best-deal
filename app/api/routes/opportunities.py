@@ -10,9 +10,13 @@ from app.core.config import Settings, get_settings
 from app.db.session import get_session
 from app.domain.enums import OpportunityStage, SellerType
 from app.scraping.contracts import SearchFilters
+from app.services.ai_extraction import AIExtractionService
 from app.services.decision_reports import (
+    REPORT_CSV_CONTENT_TYPE,
+    REPORT_PDF_CONTENT_TYPE,
     create_decision_report,
     decision_report_payload,
+    ensure_decision_report_exports,
     get_latest_decision_report,
     mark_latest_decision_report_stale,
     render_decision_report_html,
@@ -22,6 +26,12 @@ from app.services.comparable_editing import (
     list_opportunity_comparables,
     pricing_analysis_payload,
     recalculate_opportunity_pricing,
+)
+from app.services.candidate_analysis import (
+    candidate_analysis_summary_payload,
+    image_analysis_summary_payload,
+    latest_candidate_analysis,
+    latest_image_analysis,
 )
 from app.services.dealer_corrections import (
     DealerCorrectionError,
@@ -62,6 +72,7 @@ from app.services.opportunity_title import (
     title_evidence_payload,
     title_evidence_summary_payload,
 )
+from app.services.lien_profiles import lien_profile_summary_payload, list_lien_profiles
 from app.services.recall_compliance import (
     RecallComplianceError,
     create_recall_compliance_evidence,
@@ -368,7 +379,10 @@ async def create_opportunity_from_listing(
         seller_type=SellerType.UNKNOWN,
         limit=payload.listing_limit,
     )
-    pipeline = SearchPipeline(settings)
+    pipeline = SearchPipeline(
+        settings,
+        ai_extractor=AIExtractionService(settings, session=session) if settings.ai_extraction_enabled else None,
+    )
     try:
         search_result = await pipeline.run_single_listing_analysis_with_statuses(
             payload.listing_url,
@@ -434,7 +448,10 @@ async def create_opportunity_from_vin(
         seller_type=SellerType.UNKNOWN,
         limit=payload.listing_limit,
     )
-    pipeline = SearchPipeline(settings)
+    pipeline = SearchPipeline(
+        settings,
+        ai_extractor=AIExtractionService(settings, session=session) if settings.ai_extraction_enabled else None,
+    )
     try:
         search_result = await pipeline.run_vin_analysis_with_statuses(
             payload.vin,
@@ -555,15 +572,32 @@ def patch_opportunity_visit_checklist(
 
 
 @router.put("/{opportunity_id}/history")
-def put_opportunity_history(
+async def put_opportunity_history(
     opportunity_id: str,
     payload: OpportunityHistoryRequest,
     session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> dict:
+    history_data = payload.model_dump(mode="json")
+    extraction_result = None
+    history_text = _history_extraction_text(history_data)
+    if history_text and settings.ai_extraction_enabled:
+        extraction_result = await AIExtractionService(
+            settings,
+            session=session,
+            object_store=LocalObjectStore(settings.object_store_root),
+        ).vehicle_history(opportunity_id=opportunity_id, text=history_text)
+        if extraction_result is not None:
+            history_data = _merge_history_ai_extraction(history_data, extraction_result.parsed_output)
+            raw_payload = dict(history_data.get("raw_payload") or {})
+            raw_payload["ai_extraction"] = extraction_result.reference()
+            raw_payload["ai_extracted_fields"] = extraction_result.parsed_output
+            history_data["raw_payload"] = raw_payload
+
     result = upsert_opportunity_history(
         session,
         opportunity_id=opportunity_id,
-        history_data=payload.model_dump(mode="json"),
+        history_data=history_data,
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Opportunity not found")
@@ -573,6 +607,7 @@ def put_opportunity_history(
     return {
         "history": history_payload(profile),
         "opportunity": _opportunity_response(session, opportunity, candidate, latest_report=latest_report),
+        "ai_extraction": extraction_result.reference() if extraction_result is not None else None,
     }
 
 
@@ -819,14 +854,25 @@ def get_opportunity_comparables(opportunity_id: str, session: Session = Depends(
 
 
 @router.post("/{opportunity_id}/recalculate")
-def post_opportunity_recalculate(opportunity_id: str, session: Session = Depends(get_session)) -> dict:
+def post_opportunity_recalculate(
+    opportunity_id: str,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict:
     if get_opportunity_with_candidate(session, opportunity_id) is None:
         raise HTTPException(status_code=404, detail="Opportunity not found")
     try:
         pricing = recalculate_opportunity_pricing(session, opportunity_id=opportunity_id)
     except ComparableEditingError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    report = create_decision_report(session, opportunity_id=opportunity_id)
+    report = create_decision_report(
+        session,
+        opportunity_id=opportunity_id,
+        object_store=LocalObjectStore(settings.object_store_root),
+        ai_extractor=AIExtractionService(settings, session=session, object_store=LocalObjectStore(settings.object_store_root))
+        if settings.ai_extraction_enabled
+        else None,
+    )
     refreshed = get_opportunity_with_candidate(session, opportunity_id)
     if refreshed is None:
         raise HTTPException(status_code=404, detail="Opportunity not found")
@@ -916,8 +962,19 @@ def get_opportunity_feedback(opportunity_id: str, session: Session = Depends(get
 
 
 @router.post("/{opportunity_id}/reports")
-def post_opportunity_report(opportunity_id: str, session: Session = Depends(get_session)) -> dict:
-    report = create_decision_report(session, opportunity_id=opportunity_id)
+def post_opportunity_report(
+    opportunity_id: str,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    report = create_decision_report(
+        session,
+        opportunity_id=opportunity_id,
+        object_store=LocalObjectStore(settings.object_store_root),
+        ai_extractor=AIExtractionService(settings, session=session, object_store=LocalObjectStore(settings.object_store_root))
+        if settings.ai_extraction_enabled
+        else None,
+    )
     if report is None:
         raise HTTPException(status_code=404, detail="Opportunity not found")
     return decision_report_payload(report)
@@ -946,6 +1003,36 @@ def get_latest_opportunity_report_html(
     return HTMLResponse(render_decision_report_html(report))
 
 
+@router.get("/{opportunity_id}/reports/latest/pdf")
+def download_latest_opportunity_report_pdf(
+    opportunity_id: str,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    report = _latest_report_with_exports(opportunity_id, session, settings)
+    return _download_report_export(
+        settings,
+        object_key=report.pdf_object_key,
+        content_type=REPORT_PDF_CONTENT_TYPE,
+        filename=f"decision-report-v{report.version}.pdf",
+    )
+
+
+@router.get("/{opportunity_id}/reports/latest/csv")
+def download_latest_opportunity_report_csv(
+    opportunity_id: str,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    report = _latest_report_with_exports(opportunity_id, session, settings)
+    return _download_report_export(
+        settings,
+        object_key=report.csv_object_key,
+        content_type=REPORT_CSV_CONTENT_TYPE,
+        filename=f"decision-report-v{report.version}.csv",
+    )
+
+
 def _opportunity_response(
     session: Session,
     opportunity,
@@ -960,6 +1047,12 @@ def _opportunity_response(
     response["documents"] = document_summary_payload(documents)
     title_items = list_title_evidence(session, opportunity_id=opportunity.id) or []
     response["title_evidence"] = title_evidence_summary_payload(session, title_items)
+    lien_profiles = list_lien_profiles(session, opportunity.id)
+    response["lien_profile"] = lien_profile_summary_payload(lien_profiles)
+    response["candidate_analysis"] = candidate_analysis_summary_payload(
+        latest_candidate_analysis(session, opportunity.id)
+    )
+    response["image_analysis"] = image_analysis_summary_payload(latest_image_analysis(session, opportunity.id))
     recall_items = list_recall_compliance_evidence(session, opportunity_id=opportunity.id) or []
     response["recall_compliance"] = recall_compliance_summary_payload(session, recall_items)
     wholesale_items = list_wholesale_evidence(session, opportunity_id=opportunity.id) or []
@@ -989,8 +1082,76 @@ def _latest_report_summary(report) -> dict | None:
         "status": report.status,
         "recommendation": report.recommendation,
         "html_url": f"/api/opportunities/{report.opportunity_id}/reports/latest/html",
+        "pdf_url": f"/api/opportunities/{report.opportunity_id}/reports/latest/pdf",
+        "csv_url": f"/api/opportunities/{report.opportunity_id}/reports/latest/csv",
+        "pdf_object_key": report.pdf_object_key,
+        "csv_object_key": report.csv_object_key,
         "created_at": report.created_at.isoformat() if report.created_at else None,
     }
+
+
+def _latest_report_with_exports(opportunity_id: str, session: Session, settings: Settings):
+    if get_opportunity_with_candidate(session, opportunity_id) is None:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+    report = get_latest_decision_report(session, opportunity_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Decision report not found")
+    return ensure_decision_report_exports(
+        session,
+        report,
+        object_store=LocalObjectStore(settings.object_store_root),
+    )
+
+
+def _download_report_export(
+    settings: Settings,
+    *,
+    object_key: str | None,
+    content_type: str,
+    filename: str,
+) -> Response:
+    if not object_key:
+        raise HTTPException(status_code=404, detail="Report export not found")
+    try:
+        data = LocalObjectStore(settings.object_store_root).read_bytes(object_key)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Report export object not found") from exc
+    safe_filename = filename.replace("\\", "_").replace('"', "_")
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{safe_filename}"'},
+    )
+
+
+def _history_extraction_text(history_data: dict) -> str | None:
+    raw_payload = history_data.get("raw_payload") or {}
+    if not isinstance(raw_payload, dict):
+        return None
+    for key in ["document_text", "history_text", "ocr_text", "text"]:
+        value = raw_payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _merge_history_ai_extraction(history_data: dict, extracted: dict) -> dict:
+    merged = dict(history_data)
+    for key in [
+        "source_type",
+        "title_brand",
+        "accident_claims",
+        "odometer_issue",
+        "summary",
+    ]:
+        value = extracted.get(key)
+        if _empty_history_value(merged.get(key)) and value not in (None, [], ""):
+            merged[key] = value
+    return merged
+
+
+def _empty_history_value(value) -> bool:
+    return value in (None, "", [], {}, "unknown")
 
 
 def _sources_from_request(sources: str) -> tuple[str, ...]:

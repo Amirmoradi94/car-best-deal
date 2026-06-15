@@ -1,34 +1,16 @@
 <claude-mem-context>
 # Memory Context
 
-# [car-dealer] recent context, 2026-06-15 1:16am EDT
+# [car-dealer] recent context, 2026-06-15 1:37pm EDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (19,580t read) | 605,956t work | 97% savings
+Stats: 50 obs (19,794t read) | 670,707t work | 97% savings
 
-### Jun 14, 2026
-7805 1:24p 🔵 Document Upload Gap Analysis: History Ingestion Exists as JSON, File Upload Layer Missing
-7806 " 🔵 Complete API and Service Layer Map for Document Upload Implementation
-7807 1:25p ✅ python-multipart Dependency Added to Enable File Upload Support
-7808 1:26p 🟣 OpportunityDocument SQLAlchemy Model Added to DB Models
-7809 " 🟣 Document Upload Service Layer Implemented
-7810 " 🟣 Alembic Migration and Settings Field Added for Document Upload
-7814 " 🟣 Document Upload API Routes Added to Opportunities Router
-7815 1:28p 🟣 Decision Reports Integrated with Uploaded Documents
-7816 " 🟣 Document Upload UI Added to Dashboard Opportunity Cards
-7817 " 🟣 Document Upload CSS Styles Added to Dashboard
-7818 " ✅ Implementation Plan Document Created for Document Upload Fallback
-7819 1:29p ✅ Migration Smoke Test Updated for Document Upload Schema
-7820 " ✅ Dashboard Static Asset Test Updated for Document Upload Controls
-7821 " 🟣 Document Upload API Tests Added to test_previsit_persistence.py
 ### Jun 15, 2026
-7875 12:13a 🔵 Alert System Gap Analysis — Schema Exists, Implementation Missing
-7878 12:14a 🟣 In-App Alert Inbox UI Implemented in Dashboard
-7879 " 🟣 Alert Card CSS Added to Dashboard Stylesheet
-7880 " 🟣 Integration Tests Added for Alert Generation, Email Dry-Run, and Price-Drop Detection
+7880 12:14a 🟣 Integration Tests Added for Alert Generation, Email Dry-Run, and Price-Drop Detection
 7881 " 🔄 Test Client Gains testing_session() Helper; Dashboard Tests Assert Alert UI Presence
 7882 " 🟣 Alerts Table Migration Assertion Added; Alembic Version Bumped to 4c6d8e2a91b7
 7883 " ✅ SMTP and Alert Email Environment Variables Added to .env.example
@@ -61,6 +43,23 @@ Stats: 50 obs (19,580t read) | 605,956t work | 97% savings
 7910 12:21a 🔴 PATCH /api/settings Fixed: target_profit_cad Now Maps to default_target_profit_cad Column
 7911 " 🟣 Dealer Settings Management Feature Complete — 107 Tests Passing, No Regressions
 7913 12:34a ⚖️ Natural-Language Search Interpretation Feature Planned for Implementation
+7914 1:07p 🔵 Car-Dealer Project Structure Mapped for Price-Drop Tracking Feature
+7915 " 🔵 Price-Drop Alert Logic Already Partially Implemented in alerts.py
+7916 " 🔵 DB Schema: ListingSnapshotModel and CandidateSnapshot Store Price but No Price History Chain
+7917 1:08p 🔵 Alembic Migration Head is b7f2a91c6d3e (ai_model_outputs) — Price-Drop Feature Needs New Migration
+7918 " 🔵 Price-Drop Detection Test Already Passes Using CandidateSnapshot Cross-Run Comparison
+7919 1:09p ⚖️ Price-Drop Tracking: Architecture Decision to Reuse listings + listing_snapshots Tables
+7920 " 🟣 New Service app/services/price_history.py Created for Listing Price History Persistence
+7921 " 🟣 previsit_persistence.py Updated to Record Listing Price History per Candidate
+7922 1:10p 🟣 alerts.py Upgraded: Price-Drop Detection Now Uses listing_snapshots History First, Falls Back to CandidateSnapshot
+7923 " 🟣 Tests Updated to Assert Listing + ListingSnapshot Rows Written and Price History Embedded in pricing_summary
+7924 " 🔵 _candidate_payload() Already Exposes Full pricing_summary — No API Route Changes Needed for price_history
+7925 1:11p 🔵 Tests Run via uv run --extra dev pytest — Not Bare pytest
+7926 " 🟣 All 60 Tests Pass After Price-Drop Tracking Implementation
+7927 " 🟣 Full Test Suite Passes: 118 Passed, 2 Skipped (Postgres Runtime), 0 Failed
+7930 " 🔵 backend-readme.md Has Stale Price-Drop Alert Description; Git Working Tree Contains Both AI Audit Trail and Price-Drop Changes Uncommitted
+7931 1:12p ✅ backend-readme.md Updated with Accurate Price-Drop Tracking Documentation
+7933 " 🔵 Dashboard Candidate Pricing Section Does Not Expose price_history — UI Gap Identified
 
-Access 606k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 671k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>

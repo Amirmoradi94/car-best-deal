@@ -553,6 +553,15 @@ async function openLatestOpportunityReport(opportunityId) {
   }
 }
 
+function downloadLatestOpportunityReport(opportunityId, format) {
+  if (!opportunityId || !format) return;
+  window.open(
+    `/api/opportunities/${encodeURIComponent(opportunityId)}/reports/latest/${encodeURIComponent(format)}`,
+    "_blank",
+    "noreferrer"
+  );
+}
+
 async function updateOpportunityChecklist(opportunityId) {
   if (!opportunityId) return;
   setLoading(true);
@@ -1091,6 +1100,8 @@ function renderOpportunities() {
           <div class="report-actions">
             <button type="button" data-generate-opportunity-report="${escapeAttr(opportunity.id)}">Generate Report</button>
             <button type="button" class="secondary" data-open-opportunity-report="${escapeAttr(opportunity.id)}">Open Latest</button>
+            <button type="button" class="secondary" data-download-opportunity-report-pdf="${escapeAttr(opportunity.id)}">PDF</button>
+            <button type="button" class="secondary" data-download-opportunity-report-csv="${escapeAttr(opportunity.id)}">CSV</button>
           </div>
           ${report ? `<p class="meta-row">Report v${report.version} ${escapeHtml(report.status || "")}</p>` : `<p class="meta-row">No report generated</p>`}
           <div class="opportunity-control-group">
@@ -1147,6 +1158,12 @@ function renderOpportunities() {
   });
   opportunitiesEl.querySelectorAll("[data-open-opportunity-report]").forEach((button) => {
     button.addEventListener("click", () => openLatestOpportunityReport(button.dataset.openOpportunityReport));
+  });
+  opportunitiesEl.querySelectorAll("[data-download-opportunity-report-pdf]").forEach((button) => {
+    button.addEventListener("click", () => downloadLatestOpportunityReport(button.dataset.downloadOpportunityReportPdf, "pdf"));
+  });
+  opportunitiesEl.querySelectorAll("[data-download-opportunity-report-csv]").forEach((button) => {
+    button.addEventListener("click", () => downloadLatestOpportunityReport(button.dataset.downloadOpportunityReportCsv, "csv"));
   });
   opportunitiesEl.querySelectorAll("[data-submit-opportunity-feedback]").forEach((button) => {
     button.addEventListener("click", () => submitOpportunityFeedback(button.dataset.submitOpportunityFeedback));
@@ -1240,6 +1257,7 @@ function renderAlerts() {
     .map((alert) => {
       const metadata = alert.metadata || {};
       const unread = alert.status === "unread" ? " unread" : "";
+      const priceLabel = alertPriceLabel(metadata);
       return `
         <div class="alert-card${unread}" data-alert-card="${escapeHtml(alert.id)}">
           <div class="detail-row">
@@ -1252,7 +1270,7 @@ function renderAlerts() {
             <span>${alert.created_at ? dateLabel(alert.created_at) : ""}</span>
           </div>
           <div class="detail-row">
-            <span>${metadata.new_price_cad ? money(metadata.new_price_cad) : money(metadata.asking_price_cad)}</span>
+            <span>${escapeHtml(priceLabel)}</span>
             <span>${metadata.deal_score ? `Score ${score(metadata.deal_score)}` : ""}</span>
           </div>
           <div class="saved-search-actions">
@@ -1492,6 +1510,7 @@ function renderCandidateDetail(candidate) {
         ${dataItem("Max buy", money(candidate.max_buy_price_cad || pricing.max_buy_price_cad))}
         ${dataItem("Starting offer", money(pricing.starting_offer_cad))}
       </div>
+      ${priceHistoryHtml(pricing.price_history)}
     </section>
     <section class="detail-section">
       <h3>Vehicle</h3>
@@ -1579,6 +1598,29 @@ function showSourceFailureAlert() {
 
 function dataItem(label, valueText) {
   return `<div class="data-item"><span>${escapeHtml(label)}</span><strong>${escapeHtml(valueText || "-")}</strong></div>`;
+}
+
+function priceHistoryHtml(priceHistory) {
+  if (!priceHistory || !priceHistory.snapshot_count) return "";
+  const drop = priceHistory.is_price_drop
+    ? pill(`Drop ${money(priceHistory.price_drop_amount_cad)} (${number(priceHistory.price_drop_percent)}%)`, "good")
+    : pill("No drop");
+  return `
+    <div class="data-grid">
+      ${dataItem("Seen", `${number(priceHistory.snapshot_count)}x`)}
+      ${dataItem("Previous", money(priceHistory.previous_price_cad))}
+      ${dataItem("Lowest", money(priceHistory.lowest_price_cad))}
+      ${dataItem("Highest", money(priceHistory.highest_price_cad))}
+    </div>
+    <div class="tag-list">${drop}</div>
+  `;
+}
+
+function alertPriceLabel(metadata) {
+  if (metadata.old_price_cad && metadata.new_price_cad) {
+    return `${money(metadata.old_price_cad)} -> ${money(metadata.new_price_cad)}`;
+  }
+  return metadata.new_price_cad ? money(metadata.new_price_cad) : money(metadata.asking_price_cad);
 }
 
 function tagList(items) {
@@ -2461,6 +2503,10 @@ function setLatestReportOnOpportunity(opportunityId, report) {
             status: report.status,
             recommendation: report.recommendation,
             html_url: report.html_url,
+            pdf_url: report.pdf_url,
+            csv_url: report.csv_url,
+            pdf_object_key: report.pdf_object_key,
+            csv_object_key: report.csv_object_key,
             created_at: report.created_at,
           },
         }

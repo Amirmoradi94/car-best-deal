@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Opportunity, OpportunityDocument, OpportunityTitleEvidence
+from app.services.lien_profiles import create_lien_profile_from_title_evidence
 from app.services.opportunity_documents import DOCUMENT_TYPE_LABELS, document_payload
 from app.services.opportunity_promotion import normalized_visit_checklist
 
@@ -109,6 +110,8 @@ def create_title_evidence(
     _apply_title_workflow_state(opportunity, evidence)
     session.add(evidence)
     session.add(opportunity)
+    session.flush()
+    create_lien_profile_from_title_evidence(session, evidence)
     session.commit()
     session.refresh(evidence)
     session.refresh(opportunity)

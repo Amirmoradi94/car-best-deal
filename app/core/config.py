@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     gemini_api_url: str = Field(default="https://generativelanguage.googleapis.com/v1beta", alias="GEMINI_API_URL")
     gemini_model: str = Field(default="gemini-3.5-flash", alias="GEMINI_MODEL")
+    ai_extraction_enabled: bool = Field(default=True, alias="AI_EXTRACTION_ENABLED")
+    gemini_text_analysis_enabled: bool = Field(default=False, alias="GEMINI_TEXT_ANALYSIS_ENABLED")
     gemini_image_analysis_enabled: bool = Field(default=False, alias="GEMINI_IMAGE_ANALYSIS_ENABLED")
     image_fetch_timeout_seconds: float = Field(default=8.0, alias="IMAGE_FETCH_TIMEOUT_SECONDS")
     image_fetch_max_bytes: int = Field(default=5_000_000, alias="IMAGE_FETCH_MAX_BYTES")

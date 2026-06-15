@@ -112,11 +112,28 @@ To enable Gemini-backed image analysis for live pre-visit enrichment, also set:
 
 ```text
 GEMINI_API_KEY=...
+AI_EXTRACTION_ENABLED=true
+GEMINI_TEXT_ANALYSIS_ENABLED=false
 GEMINI_IMAGE_ANALYSIS_ENABLED=true
 GEMINI_MODEL=gemini-3.5-flash
 ```
 
 The app uses the Gemini `models.generateContent` REST API with image parts and JSON output. If Gemini is disabled, credentials are missing, image fetching fails, or the app runs in fixture mode, the deterministic image-risk gate is used instead.
+
+The broader AI extraction layer uses the same Gemini endpoint for JSON text tasks when `GEMINI_TEXT_ANALYSIS_ENABLED=true` and fixture mode is off. When Gemini text analysis is disabled, deterministic local extractors still produce auditable outputs for listing fallback extraction, listing risk-language detection, comparable relevance checks, vehicle-history text extraction, and report narrative writing. Every AI task writes an `ai_model_outputs` row and stores its input/output JSON in object storage under `ai-model-outputs/{output_id}/`. Audit rows store provider, model, model version, schema name/version, raw output, schema-validated output, per-field confidence values, and source-evidence links. Candidate payloads expose `ai_outputs` references, vehicle-history responses return `ai_extraction`, and decision reports include `report_json.ai_report_narrative` plus evidence-level AI output references.
+
+## Persisted Product Entities
+
+The product requirements map to concrete persisted tables and services:
+
+- `HistoryProfile`: `opportunity_history_profiles` through the vehicle history service.
+- `LienProfile`: `lien_profiles`, created from title/lien evidence and document-upload title evidence.
+- `ImageAnalysis`: `image_analyses`, created when a candidate is promoted from persisted image-risk facts.
+- `CandidateAnalysis`: `candidate_analyses`, created when a candidate is promoted.
+- `DealerCorrection`: `dealer_corrections` through the dealer correction service.
+- `Alert`: `alerts` through saved-search alert generation and read-state APIs.
+
+Opportunity responses include `candidate_analysis`, `image_analysis`, and `lien_profile` summaries alongside existing history, title evidence, dealer correction, and alert workflows.
 
 The app stores persisted run history in SQLite by default:
 
@@ -352,7 +369,7 @@ SAVED_SEARCH_REFRESH_BATCH_LIMIT=25
 SAVED_SEARCH_REFRESH_DEFAULT_SCHEDULE=daily
 ```
 
-Saved-search alerts are generated after saved-search runs when `alerts_enabled` is true. High-score alerts use the dealer candidate score threshold, defaulting to 75. Price-drop alerts compare the current candidate price with the previous seen candidate snapshot for the same source URL or listing ID.
+Saved-search alerts are generated after saved-search runs when `alerts_enabled` is true. High-score alerts use the dealer candidate score threshold, defaulting to 75. Price-drop alerts use persisted `listing_snapshots` for the same canonical listing URL and include old price, new price, drop amount, drop percent, and listing snapshot IDs in alert metadata. Older candidate rows without price history still fall back to candidate-snapshot comparison.
 
 List alerts and mark an in-app alert read with:
 
@@ -381,7 +398,7 @@ curl http://127.0.0.1:8000/api/searches/runs/{run_id}
 curl http://127.0.0.1:8000/api/searches/runs/{run_id}/candidates/{candidate_id}
 ```
 
-Each candidate snapshot stores the ranked vehicle fields, pricing summary, risk summary, relevance metadata, image URLs, and image-risk reasons generated before physical inspection. Each search run stores `source_statuses` entries for selected sources with `ok`, `empty`, or `failed` status, parsed listing counts, source URL, and failure reason/message when available.
+Each candidate snapshot stores the ranked vehicle fields, pricing summary, risk summary, relevance metadata, image URLs, and image-risk reasons generated before physical inspection. Search-run persistence also upserts the canonical `listings` row and appends a `listing_snapshots` observation for every candidate. The candidate `pricing_summary.price_history` object exposes current, previous, first, lowest, and highest prices plus `is_price_drop` when the latest listing snapshot is lower than the prior one. Each search run stores `source_statuses` entries for selected sources with `ok`, `empty`, or `failed` status, parsed listing counts, source URL, and failure reason/message when available.
 
 Update candidate workflow state from the run detail screen with:
 
@@ -473,10 +490,19 @@ curl http://127.0.0.1:8000/api/opportunities/{opportunity_id}/reports/latest
 curl http://127.0.0.1:8000/api/opportunities/{opportunity_id}/reports/latest/html
 ```
 
+Each generated report also writes PDF and CSV export artifacts to object storage and stores their object keys on the report row. Download the latest opportunity exports with:
+
+```bash
+curl -OJ http://127.0.0.1:8000/api/opportunities/{opportunity_id}/reports/latest/pdf
+curl -OJ http://127.0.0.1:8000/api/opportunities/{opportunity_id}/reports/latest/csv
+```
+
 You can also fetch a report directly by ID:
 
 ```bash
 curl http://127.0.0.1:8000/api/reports/{report_id}
+curl -OJ http://127.0.0.1:8000/api/reports/{report_id}/pdf
+curl -OJ http://127.0.0.1:8000/api/reports/{report_id}/csv
 ```
 
 ## Comparable Editing

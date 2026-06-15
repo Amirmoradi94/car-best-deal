@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import csv
 from decimal import Decimal
 from html import escape
+from io import StringIO
+from textwrap import wrap
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -62,9 +66,20 @@ from app.services.wholesale_evidence import (
     wholesale_risk_factors,
     wholesale_support_payload,
 )
+from app.services.ai_extraction import AIExtractionService
+from app.storage.object_store import LocalObjectStore, ObjectStore
+
+REPORT_PDF_CONTENT_TYPE = "application/pdf"
+REPORT_CSV_CONTENT_TYPE = "text/csv; charset=utf-8"
 
 
-def create_decision_report(session: Session, *, opportunity_id: str) -> DecisionReport | None:
+def create_decision_report(
+    session: Session,
+    *,
+    opportunity_id: str,
+    object_store: ObjectStore | None = None,
+    ai_extractor: AIExtractionService | None = None,
+) -> DecisionReport | None:
     result = get_opportunity_with_candidate(session, opportunity_id)
     if result is None:
         return None
@@ -105,8 +120,22 @@ def create_decision_report(session: Session, *, opportunity_id: str) -> Decision
         confidence_by_section=report_json["confidence_by_section"],
     )
     session.add(report)
+    session.flush()
+    if ai_extractor is not None:
+        narrative = ai_extractor.report_writing(report_id=report.id, report_json=report.report_json)
+        if narrative is not None:
+            report_json = dict(report.report_json or {})
+            report_json["ai_report_narrative"] = narrative.parsed_output
+            evidence = dict(report_json.get("evidence") or {})
+            evidence["ai_outputs"] = [
+                *list(evidence.get("ai_outputs") or []),
+                narrative.reference(),
+            ]
+            report_json["evidence"] = evidence
+            report.report_json = report_json
     session.commit()
     session.refresh(report)
+    ensure_decision_report_exports(session, report, object_store=object_store)
     return report
 
 
@@ -139,6 +168,31 @@ def mark_latest_decision_report_stale(session: Session, *, opportunity_id: str) 
     return report
 
 
+def ensure_decision_report_exports(
+    session: Session,
+    report: DecisionReport,
+    *,
+    object_store: ObjectStore | None = None,
+) -> DecisionReport:
+    if report.pdf_object_key and report.csv_object_key:
+        return report
+
+    store = object_store or LocalObjectStore()
+    base_key = f"reports/{report.id}/decision-report-v{report.version}"
+    if not report.pdf_object_key:
+        pdf_key = f"{base_key}.pdf"
+        store.put_bytes(pdf_key, render_decision_report_pdf(report), REPORT_PDF_CONTENT_TYPE)
+        report.pdf_object_key = pdf_key
+    if not report.csv_object_key:
+        csv_key = f"{base_key}.csv"
+        store.put_text(csv_key, render_decision_report_csv(report), REPORT_CSV_CONTENT_TYPE)
+        report.csv_object_key = csv_key
+    session.add(report)
+    session.commit()
+    session.refresh(report)
+    return report
+
+
 def decision_report_payload(report: DecisionReport) -> dict:
     return {
         "id": report.id,
@@ -149,6 +203,10 @@ def decision_report_payload(report: DecisionReport) -> dict:
         "report_json": report.report_json,
         "confidence_by_section": report.confidence_by_section,
         "html_url": f"/api/opportunities/{report.opportunity_id}/reports/latest/html",
+        "pdf_url": f"/api/reports/{report.id}/pdf",
+        "csv_url": f"/api/reports/{report.id}/csv",
+        "pdf_object_key": report.pdf_object_key,
+        "csv_object_key": report.csv_object_key,
         "created_at": report.created_at.isoformat() if report.created_at else None,
         "updated_at": report.updated_at.isoformat() if report.updated_at else None,
     }
@@ -286,6 +344,7 @@ def build_report_json(
             "uploaded_documents": _document_evidence_payload(uploaded_documents),
             "dealer_corrections": report_corrections_payload(corrections),
             "comparables": comparable_payload,
+            "ai_outputs": list(candidate.ai_outputs or []) if candidate is not None else [],
             "confidence_by_section": candidate.confidence_by_section if candidate is not None else {},
         },
         "confidence_by_section": candidate.confidence_by_section if candidate is not None else {},
@@ -454,6 +513,101 @@ def render_decision_report_html(report: DecisionReport) -> str:
     </main>
   </body>
 </html>"""
+
+
+def render_decision_report_csv(report: DecisionReport) -> str:
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["section", "field", "value"])
+    writer.writerow(["report", "id", report.id])
+    writer.writerow(["report", "opportunity_id", report.opportunity_id])
+    writer.writerow(["report", "version", report.version])
+    writer.writerow(["report", "status", report.status])
+
+    data = report.report_json or {}
+    for section in [
+        "summary",
+        "vehicle",
+        "listing",
+        "pricing",
+        "image_review",
+    ]:
+        _write_mapping_rows(writer, section, data.get(section, {}))
+
+    risk = data.get("risk", {}) if isinstance(data.get("risk"), dict) else {}
+    _write_mapping_rows(
+        writer,
+        "risk",
+        {key: value for key, value in risk.items() if not isinstance(value, list)},
+    )
+    _write_list_rows(writer, "risk", "risk_factors", risk.get("risk_factors", []))
+    _write_list_rows(writer, "risk", "missing_verifications", risk.get("missing_verifications", []))
+    _write_list_rows(writer, "risk", "readiness_warnings", risk.get("readiness_warnings", []))
+
+    verification = data.get("verification", {}) if isinstance(data.get("verification"), dict) else {}
+    for key, payload in verification.items():
+        _write_mapping_rows(writer, f"verification.{key}", payload)
+
+    visit_checklist = data.get("visit_checklist", {}) if isinstance(data.get("visit_checklist"), dict) else {}
+    for item in visit_checklist.get("items", []) or []:
+        if isinstance(item, dict):
+            writer.writerow(["visit_checklist", item.get("key") or item.get("label") or "item", item.get("complete")])
+
+    _write_list_rows(writer, "next_actions", "action", data.get("next_actions", []))
+    _write_document_rows(writer, data)
+    _write_comparable_rows(writer, data.get("comparables", {}))
+
+    return output.getvalue()
+
+
+def render_decision_report_pdf(report: DecisionReport) -> bytes:
+    lines = _pdf_report_lines(report)
+    pages = [lines[index : index + 46] for index in range(0, len(lines), 46)] or [["Decision Report"]]
+    objects: list[bytes] = []
+    catalog_id = 1
+    pages_id = 2
+    font_id = 3
+    page_ids: list[int] = []
+
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(b"")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+    for page_lines in pages:
+        content = _pdf_page_content(page_lines)
+        content_id = len(objects) + 2
+        page_id = len(objects) + 1
+        page_ids.append(page_id)
+        objects.append(
+            (
+                f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 612 792] "
+                f"/Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {content_id} 0 R >>"
+            ).encode("ascii")
+        )
+        objects.append(b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream")
+
+    kids = " ".join(f"{page_id} 0 R" for page_id in page_ids)
+    objects[pages_id - 1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_ids)} >>".encode("ascii")
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, payload in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{index} 0 obj\n".encode("ascii"))
+        pdf.extend(payload)
+        pdf.extend(b"\nendobj\n")
+    xref_offset = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        (
+            f"trailer\n<< /Size {len(objects) + 1} /Root {catalog_id} 0 R >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    return bytes(pdf)
 
 
 def _next_report_version(session: Session, opportunity_id: str) -> int:
@@ -1046,3 +1200,149 @@ def _json_number(value):
     if isinstance(value, Decimal):
         return float(value)
     return value
+
+
+def _write_mapping_rows(writer: Any, section: str, payload: object) -> None:
+    if not isinstance(payload, dict):
+        return
+    for key, value in payload.items():
+        if isinstance(value, (dict, list)):
+            continue
+        writer.writerow([section, key, _csv_value(value)])
+
+
+def _write_list_rows(writer: Any, section: str, field: str, values: object) -> None:
+    if not isinstance(values, list):
+        return
+    for value in values:
+        writer.writerow([section, field, _csv_value(value)])
+
+
+def _write_document_rows(writer: Any, data: dict) -> None:
+    evidence = data.get("evidence", {}) if isinstance(data.get("evidence"), dict) else {}
+    documents = evidence.get("uploaded_documents", [])
+    if not isinstance(documents, list):
+        return
+    for index, document in enumerate(documents, start=1):
+        if not isinstance(document, dict):
+            continue
+        prefix = f"uploaded_documents.{index}"
+        for key in ["document_type", "document_label", "original_filename", "content_type", "size_bytes", "sha256"]:
+            writer.writerow([prefix, key, _csv_value(document.get(key))])
+
+
+def _write_comparable_rows(writer: Any, comparables: object) -> None:
+    if not isinstance(comparables, dict):
+        return
+    for key in ["count", "included_count", "excluded_count"]:
+        writer.writerow(["comparables", key, _csv_value(comparables.get(key))])
+    items = comparables.get("comparables", [])
+    if not isinstance(items, list):
+        return
+    for index, comparable in enumerate(items, start=1):
+        if not isinstance(comparable, dict):
+            continue
+        prefix = f"comparables.{index}"
+        for key in [
+            "source_name",
+            "year",
+            "make",
+            "model",
+            "trim",
+            "mileage_km",
+            "asking_price_cad",
+            "similarity_score",
+            "included",
+            "excluded_reason",
+        ]:
+            writer.writerow([prefix, key, _csv_value(comparable.get(key))])
+
+
+def _csv_value(value: object) -> str:
+    value = _json_number(value)
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _pdf_report_lines(report: DecisionReport) -> list[str]:
+    data = report.report_json or {}
+    summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
+    vehicle = data.get("vehicle", {}) if isinstance(data.get("vehicle"), dict) else {}
+    listing = data.get("listing", {}) if isinstance(data.get("listing"), dict) else {}
+    pricing = data.get("pricing", {}) if isinstance(data.get("pricing"), dict) else {}
+    risk = data.get("risk", {}) if isinstance(data.get("risk"), dict) else {}
+    verification = data.get("verification", {}) if isinstance(data.get("verification"), dict) else {}
+
+    lines = [
+        f"Decision Report v{report.version}",
+        _vehicle_title(vehicle),
+        "",
+        f"Recommendation: {str(summary.get('recommendation') or '-').replace('_', ' ')}",
+        f"Status: {str(summary.get('status') or report.status or '-').replace('_', ' ')}",
+        f"Deal score: {summary.get('deal_score') if summary.get('deal_score') is not None else '-'}",
+        "",
+        "Pricing",
+        f"Ask: {_money(pricing.get('asking_price_cad'))}",
+        f"Retail mid: {_money(pricing.get('retail_mid_cad'))}",
+        f"Max buy: {_money(pricing.get('max_buy_price_cad'))}",
+        f"Starting offer: {_money(pricing.get('starting_offer_cad'))}",
+        f"Wholesale support: {_money(pricing.get('wholesale_supported_max_buy_cad'))}",
+        "",
+        "Vehicle and Listing",
+        f"VIN: {vehicle.get('vin') or 'Missing'}",
+        f"Mileage: {_km(vehicle.get('mileage_km'))}",
+        f"Location: {listing.get('location') or '-'}",
+        f"Source: {listing.get('source') or '-'}",
+        "",
+        "Verification",
+        f"VIN: {_verification_status(verification, 'vin')}",
+        f"History: {_verification_status(verification, 'history')}",
+        f"Lien/title: {_verification_status(verification, 'lien_title')}",
+        f"Recall: {_verification_status(verification, 'recall')}",
+        "",
+        "Missing Data",
+    ]
+    lines.extend(_prefixed_lines(risk.get("missing_verifications", [])))
+    lines.extend(["", "Risk Factors"])
+    lines.extend(_prefixed_lines(risk.get("risk_factors", [])))
+    lines.extend(["", "Next Actions"])
+    lines.extend(_prefixed_lines(data.get("next_actions", []), numbered=True))
+    return _wrapped_pdf_lines(lines)
+
+
+def _prefixed_lines(items: object, *, numbered: bool = False) -> list[str]:
+    if not isinstance(items, list) or not items:
+        return ["- None"]
+    lines = []
+    for index, item in enumerate(items, start=1):
+        prefix = f"{index}. " if numbered else "- "
+        lines.append(f"{prefix}{item}")
+    return lines
+
+
+def _wrapped_pdf_lines(lines: list[str]) -> list[str]:
+    wrapped_lines: list[str] = []
+    for line in lines:
+        text = str(line)
+        if not text:
+            wrapped_lines.append("")
+            continue
+        wrapped_lines.extend(wrap(text, width=88, break_long_words=False, replace_whitespace=False) or [""])
+    return wrapped_lines
+
+
+def _pdf_page_content(lines: list[str]) -> bytes:
+    content = ["BT", "/F1 11 Tf", "14 TL", "50 742 Td"]
+    for index, line in enumerate(lines):
+        if index:
+            content.append("T*")
+        content.append(f"({_pdf_escape(line)}) Tj")
+    content.append("ET")
+    return "\n".join(content).encode("latin-1", errors="replace")
+
+
+def _pdf_escape(value: object) -> str:
+    return str(value).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")

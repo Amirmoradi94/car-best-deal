@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import CandidateSnapshot, Opportunity
 from app.domain.enums import OpportunityStage
+from app.services.candidate_analysis import create_candidate_analysis_from_snapshot
 from app.services.previsit_persistence import get_candidate_snapshot
 from app.services.saved_searches import get_or_create_default_dealer
 
@@ -34,6 +35,10 @@ def promote_candidate_to_opportunity(
     if candidate.opportunity_id:
         opportunity = session.get(Opportunity, candidate.opportunity_id)
         if opportunity is not None:
+            create_candidate_analysis_from_snapshot(session, opportunity=opportunity, candidate=candidate)
+            session.commit()
+            session.refresh(opportunity)
+            session.refresh(candidate)
             return opportunity, candidate
 
     dealer = get_or_create_default_dealer(session)
@@ -57,6 +62,7 @@ def promote_candidate_to_opportunity(
     candidate.selected = True
     candidate.opportunity_id = opportunity.id
     session.add(candidate)
+    create_candidate_analysis_from_snapshot(session, opportunity=opportunity, candidate=candidate)
     session.commit()
     session.refresh(opportunity)
     session.refresh(candidate)
@@ -253,6 +259,8 @@ def candidate_summary_payload(candidate: CandidateSnapshot) -> dict:
         "pricing_summary": candidate.pricing_summary,
         "risk_summary": candidate.risk_summary,
         "image_count": len(candidate.image_urls),
+        "image_risk_adjustment": _json_number(candidate.image_risk_adjustment),
+        "image_risk_reasons": candidate.image_risk_reasons,
         "selected": candidate.selected,
         "hidden": candidate.hidden,
         "seller_contact_status": candidate.seller_contact_status,

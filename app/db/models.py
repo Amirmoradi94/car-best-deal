@@ -311,6 +311,93 @@ class DealerCorrection(UuidMixin, TimestampMixin, Base):
     apply_to_future: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
+class CandidateAnalysis(UuidMixin, TimestampMixin, Base):
+    __tablename__ = "candidate_analyses"
+    __table_args__ = (UniqueConstraint("opportunity_id", "candidate_snapshot_id"),)
+
+    opportunity_id: Mapped[str] = mapped_column(ForeignKey("opportunities.id"), nullable=False)
+    candidate_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("candidate_snapshots.id"))
+    status: Mapped[str] = mapped_column(Text, default="completed", nullable=False)
+    selected_reason: Mapped[str | None] = mapped_column(Text)
+    score_at_selection: Mapped[float | None] = mapped_column(Numeric(5, 2))
+    max_images_to_analyze: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    images_discovered_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    images_analyzed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
+    error_summary: Mapped[str | None] = mapped_column(Text)
+    analysis_summary: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
+
+
+class ImageAnalysis(UuidMixin, TimestampMixin, Base):
+    __tablename__ = "image_analyses"
+    __table_args__ = (UniqueConstraint("opportunity_id", "candidate_analysis_id"),)
+
+    opportunity_id: Mapped[str] = mapped_column(ForeignKey("opportunities.id"), nullable=False)
+    candidate_analysis_id: Mapped[str | None] = mapped_column(ForeignKey("candidate_analyses.id"))
+    candidate_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("candidate_snapshots.id"))
+    model_provider: Mapped[str] = mapped_column(Text, default="local", nullable=False)
+    model_name: Mapped[str] = mapped_column(Text, default="deterministic-image-risk", nullable=False)
+    prompt_version: Mapped[str] = mapped_column(Text, default="image-risk-v1", nullable=False)
+    image_urls: Mapped[list] = mapped_column(JSONType, default=list, nullable=False)
+    findings: Mapped[list] = mapped_column(JSONType, default=list, nullable=False)
+    visible_damage: Mapped[bool | None] = mapped_column(Boolean)
+    rust_detected: Mapped[bool | None] = mapped_column(Boolean)
+    panel_mismatch_detected: Mapped[bool | None] = mapped_column(Boolean)
+    tire_wear_concern: Mapped[bool | None] = mapped_column(Boolean)
+    interior_condition: Mapped[str | None] = mapped_column(Text)
+    warning_lights_visible: Mapped[bool | None] = mapped_column(Boolean)
+    odometer_visible: Mapped[bool | None] = mapped_column(Boolean)
+    odometer_km: Mapped[int | None] = mapped_column(Integer)
+    vin_visible: Mapped[bool | None] = mapped_column(Boolean)
+    vin: Mapped[str | None] = mapped_column(Text)
+    risk_adjustment: Mapped[float] = mapped_column(Numeric(5, 2), default=0, nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    raw_payload: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
+
+
+class LienProfile(UuidMixin, TimestampMixin, Base):
+    __tablename__ = "lien_profiles"
+
+    opportunity_id: Mapped[str] = mapped_column(ForeignKey("opportunities.id"), nullable=False)
+    title_evidence_id: Mapped[str | None] = mapped_column(ForeignKey("opportunity_title_evidence.id"))
+    source_type: Mapped[str] = mapped_column(Text, default="manual", nullable=False)
+    lien_status: Mapped[str] = mapped_column(Text, default="not_verified", nullable=False)
+    title_status: Mapped[str] = mapped_column(Text, default="unknown", nullable=False)
+    evidence_summary: Mapped[str | None] = mapped_column(Text)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    lienholder_name: Mapped[str | None] = mapped_column(Text)
+    lien_amount_cad: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    payout_required: Mapped[bool | None] = mapped_column(Boolean)
+    payout_amount_cad: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    payout_status: Mapped[str] = mapped_column(Text, default="unknown", nullable=False)
+    raw_payload: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
+
+
+class AIModelOutput(UuidMixin, TimestampMixin, Base):
+    __tablename__ = "ai_model_outputs"
+
+    feature: Mapped[str] = mapped_column(Text, nullable=False)
+    subject_type: Mapped[str] = mapped_column(Text, nullable=False)
+    subject_id: Mapped[str | None] = mapped_column(Text)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    model_version: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_name: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    prompt_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    input_object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    output_object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    parsed_output: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
+    validated_output: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
+    field_confidences: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
+    evidence_links: Mapped[list] = mapped_column(JSONType, default=list, nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    status: Mapped[str] = mapped_column(Text, default="completed", nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+
 class OpportunityFeedback(UuidMixin, TimestampMixin, Base):
     __tablename__ = "opportunity_feedback"
 
@@ -371,6 +458,7 @@ class CandidateSnapshot(UuidMixin, TimestampMixin, Base):
     image_risk_adjustment: Mapped[float] = mapped_column(Numeric(5, 2), default=0, nullable=False)
     image_risk_reasons: Mapped[list] = mapped_column(JSONType, default=list, nullable=False)
     confidence_by_section: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
+    ai_outputs: Mapped[list] = mapped_column(JSONType, default=list, nullable=False)
     selected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     hidden: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     seller_contact_status: Mapped[str | None] = mapped_column(Text)

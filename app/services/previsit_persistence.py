@@ -7,6 +7,11 @@ from sqlalchemy.orm import Session
 from app.db.models import CandidateSnapshot, SearchRun
 from app.domain.models import ScoredOpportunity
 from app.scraping.contracts import SearchFilters
+from app.services.price_history import (
+    PriceHistorySummary,
+    price_history_payload,
+    record_listing_price_snapshot,
+)
 
 
 def persist_search_run(
@@ -39,7 +44,8 @@ def persist_search_run(
     session.flush()
 
     for rank, scored in enumerate(scored_items, start=1):
-        session.add(_candidate_snapshot(run.id, rank, scored))
+        price_history = record_listing_price_snapshot(session, scored)
+        session.add(_candidate_snapshot(run.id, rank, scored, price_history=price_history))
 
     session.commit()
     session.refresh(run)
@@ -125,7 +131,13 @@ def _filters_payload(filters: SearchFilters) -> dict:
     }
 
 
-def _candidate_snapshot(search_run_id: str, rank: int, scored: ScoredOpportunity) -> CandidateSnapshot:
+def _candidate_snapshot(
+    search_run_id: str,
+    rank: int,
+    scored: ScoredOpportunity,
+    *,
+    price_history: PriceHistorySummary,
+) -> CandidateSnapshot:
     listing = scored.listing
     vehicle = listing.vehicle
     return CandidateSnapshot(
@@ -150,7 +162,7 @@ def _candidate_snapshot(search_run_id: str, rank: int, scored: ScoredOpportunity
         deal_score=scored.deal_score,
         recommendation=scored.recommendation.value,
         is_overpriced=scored.is_overpriced,
-        pricing_summary=_pricing_payload(scored),
+        pricing_summary=_pricing_payload(scored, price_history=price_history),
         risk_summary=_risk_payload(scored),
         relevance_score=scored.relevance_score,
         relevance_reasons=list(scored.relevance_reasons),
@@ -161,6 +173,7 @@ def _candidate_snapshot(search_run_id: str, rank: int, scored: ScoredOpportunity
             section: confidence.value
             for section, confidence in scored.confidence_by_section.items()
         },
+        ai_outputs=list(listing.ai_outputs),
     )
 
 
@@ -170,7 +183,7 @@ def _title(scored: ScoredOpportunity) -> str:
     return " ".join(str(part) for part in parts if part)
 
 
-def _pricing_payload(scored: ScoredOpportunity) -> dict:
+def _pricing_payload(scored: ScoredOpportunity, *, price_history: PriceHistorySummary) -> dict:
     pricing = scored.pricing
     return {
         "retail_low_cad": pricing.retail_low_cad,
@@ -188,6 +201,7 @@ def _pricing_payload(scored: ScoredOpportunity) -> dict:
         "starting_offer_cad": pricing.starting_offer_cad,
         "preliminary": pricing.preliminary,
         "comparables": [_comparable_payload(comparable) for comparable in scored.comparables],
+        "price_history": price_history_payload(price_history),
     }
 
 
@@ -213,6 +227,7 @@ def _risk_payload(scored: ScoredOpportunity) -> dict:
         "risk_level": scored.risk.risk_level.value,
         "missing_verifications": list(scored.risk.missing_verifications),
         "risk_factors": list(scored.risk.risk_factors),
+        "ai_risk_flags": list(scored.listing.ai_risk_flags),
     }
 
 

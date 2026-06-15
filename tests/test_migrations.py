@@ -20,6 +20,8 @@ def test_alembic_upgrade_head_creates_current_schema(tmp_path, monkeypatch) -> N
         table_names = set(inspector.get_table_names())
         assert "search_runs" in table_names
         assert "candidate_snapshots" in table_names
+        assert "listings" in table_names
+        assert "listing_snapshots" in table_names
         assert "dealer_accounts" in table_names
         assert "opportunity_documents" in table_names
         assert "opportunity_title_evidence" in table_names
@@ -28,6 +30,10 @@ def test_alembic_upgrade_head_creates_current_schema(tmp_path, monkeypatch) -> N
         assert "alerts" in table_names
         assert "dealer_corrections" in table_names
         assert "alembic_version" in table_names
+        assert "ai_model_outputs" in table_names
+        assert "candidate_analyses" in table_names
+        assert "image_analyses" in table_names
+        assert "lien_profiles" in table_names
 
         with engine.connect() as connection:
             version = connection.execute(text("select version_num from alembic_version")).scalar_one()
@@ -36,6 +42,51 @@ def test_alembic_upgrade_head_creates_current_schema(tmp_path, monkeypatch) -> N
         candidate_columns = {column["name"] for column in inspector.get_columns("candidate_snapshots")}
         assert {"selected", "hidden", "seller_contact_status", "seller_notes"}.issubset(candidate_columns)
         assert "opportunity_id" in candidate_columns
+        assert "ai_outputs" in candidate_columns
+        listing_columns = {column["name"] for column in inspector.get_columns("listings")}
+        assert {"source_name", "source_listing_id", "canonical_url", "active", "dedupe_key"}.issubset(
+            listing_columns
+        )
+        listing_snapshot_columns = {column["name"] for column in inspector.get_columns("listing_snapshots")}
+        assert {
+            "listing_id",
+            "source_name",
+            "title",
+            "asking_price_cad",
+            "mileage_km",
+            "location_city",
+            "location_province",
+            "seller_type",
+            "vin",
+            "year",
+            "make",
+            "model",
+            "trim",
+            "extraction_method",
+            "extraction_confidence",
+            "extracted_fields",
+        }.issubset(listing_snapshot_columns)
+        ai_output_columns = {column["name"] for column in inspector.get_columns("ai_model_outputs")}
+        assert {
+            "feature",
+            "subject_type",
+            "subject_id",
+            "provider",
+            "model",
+            "model_version",
+            "schema_name",
+            "schema_version",
+            "prompt_hash",
+            "input_object_key",
+            "output_object_key",
+            "parsed_output",
+            "validated_output",
+            "field_confidences",
+            "evidence_links",
+            "confidence",
+            "status",
+            "error_message",
+        }.issubset(ai_output_columns)
         opportunity_columns = {column["name"] for column in inspector.get_columns("opportunities")}
         assert "visit_checklist" in opportunity_columns
         feedback_columns = {column["name"] for column in inspector.get_columns("opportunity_feedback")}
@@ -170,9 +221,59 @@ def test_alembic_upgrade_head_creates_current_schema(tmp_path, monkeypatch) -> N
             "reason",
             "apply_to_future",
         }.issubset(correction_columns)
+        candidate_analysis_columns = {column["name"] for column in inspector.get_columns("candidate_analyses")}
+        assert {
+            "opportunity_id",
+            "candidate_snapshot_id",
+            "status",
+            "selected_reason",
+            "score_at_selection",
+            "max_images_to_analyze",
+            "images_discovered_count",
+            "images_analyzed_count",
+            "started_at",
+            "completed_at",
+            "error_summary",
+            "analysis_summary",
+        }.issubset(candidate_analysis_columns)
+        image_analysis_columns = {column["name"] for column in inspector.get_columns("image_analyses")}
+        assert {
+            "opportunity_id",
+            "candidate_analysis_id",
+            "candidate_snapshot_id",
+            "model_provider",
+            "model_name",
+            "prompt_version",
+            "image_urls",
+            "findings",
+            "visible_damage",
+            "rust_detected",
+            "panel_mismatch_detected",
+            "tire_wear_concern",
+            "risk_adjustment",
+            "confidence",
+            "raw_payload",
+        }.issubset(image_analysis_columns)
+        lien_profile_columns = {column["name"] for column in inspector.get_columns("lien_profiles")}
+        assert {
+            "opportunity_id",
+            "title_evidence_id",
+            "source_type",
+            "lien_status",
+            "title_status",
+            "evidence_summary",
+            "verified",
+            "confidence",
+            "lienholder_name",
+            "lien_amount_cad",
+            "payout_required",
+            "payout_amount_cad",
+            "payout_status",
+            "raw_payload",
+        }.issubset(lien_profile_columns)
         comparable_columns = {column["name"] for column in inspector.get_columns("comparable_listings")}
         assert "excluded_reason" in comparable_columns
 
-        assert version == "ac4e2d7b9f10"
+        assert version == "c8a4f2d9e6b1"
     finally:
         get_settings.cache_clear()

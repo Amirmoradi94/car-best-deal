@@ -61,13 +61,12 @@ def generate_alerts_for_search_run(
                 )
             )
 
-        previous = _previous_candidate_snapshot(session, candidate)
-        if (
-            previous is not None
-            and candidate.asking_price_cad is not None
-            and previous.asking_price_cad is not None
-            and _number(candidate.asking_price_cad) < _number(previous.asking_price_cad)
-        ):
+        price_drop = _candidate_price_drop(candidate)
+        previous = None
+        if price_drop is None:
+            previous = _previous_candidate_snapshot(session, candidate)
+            price_drop = _candidate_snapshot_price_drop(candidate, previous)
+        if price_drop is not None:
             generated.extend(
                 _create_channel_alerts(
                     session,
@@ -77,15 +76,20 @@ def generate_alerts_for_search_run(
                     title=f"Price drop: {candidate.title or 'Candidate'}",
                     body=(
                         f"{candidate.source_name} price dropped from "
-                        f"${_number(previous.asking_price_cad):,.0f} to ${_number(candidate.asking_price_cad):,.0f}."
+                        f"${price_drop['old_price_cad']:,.0f} to ${price_drop['new_price_cad']:,.0f}."
                     ),
                     metadata={
-                        "old_price_cad": _number(previous.asking_price_cad),
-                        "new_price_cad": _number(candidate.asking_price_cad),
+                        "old_price_cad": price_drop["old_price_cad"],
+                        "new_price_cad": price_drop["new_price_cad"],
+                        "price_drop_amount_cad": price_drop["price_drop_amount_cad"],
+                        "price_drop_percent": price_drop["price_drop_percent"],
                         "deal_score": _number(candidate.deal_score),
                         "source_name": candidate.source_name,
                         "source_url": candidate.source_url,
-                        "previous_candidate_snapshot_id": previous.id,
+                        "listing_record_id": price_drop.get("listing_record_id"),
+                        "latest_listing_snapshot_id": price_drop.get("latest_listing_snapshot_id"),
+                        "previous_listing_snapshot_id": price_drop.get("previous_listing_snapshot_id"),
+                        "previous_candidate_snapshot_id": previous.id if previous is not None else None,
                     },
                     settings=settings,
                 )
@@ -274,6 +278,52 @@ def _previous_candidate_snapshot(session: Session, candidate: CandidateSnapshot)
     )
 
 
+def _candidate_price_drop(candidate: CandidateSnapshot) -> dict[str, float | str | None] | None:
+    price_history = (candidate.pricing_summary or {}).get("price_history") or {}
+    if not price_history.get("is_price_drop"):
+        return None
+    old_price = _optional_number(price_history.get("previous_price_cad"))
+    new_price = _optional_number(price_history.get("current_price_cad"))
+    if old_price is None or new_price is None or new_price >= old_price:
+        return None
+    drop_amount = _optional_number(price_history.get("price_drop_amount_cad"))
+    drop_percent = _optional_number(price_history.get("price_drop_percent"))
+    return {
+        "old_price_cad": old_price,
+        "new_price_cad": new_price,
+        "price_drop_amount_cad": drop_amount if drop_amount is not None else round(old_price - new_price, 2),
+        "price_drop_percent": drop_percent,
+        "listing_record_id": price_history.get("listing_record_id"),
+        "latest_listing_snapshot_id": price_history.get("latest_listing_snapshot_id"),
+        "previous_listing_snapshot_id": price_history.get("previous_listing_snapshot_id"),
+    }
+
+
+def _candidate_snapshot_price_drop(
+    candidate: CandidateSnapshot,
+    previous: CandidateSnapshot | None,
+) -> dict[str, float | str | None] | None:
+    if (
+        previous is None
+        or candidate.asking_price_cad is None
+        or previous.asking_price_cad is None
+        or _number(candidate.asking_price_cad) >= _number(previous.asking_price_cad)
+    ):
+        return None
+    old_price = _number(previous.asking_price_cad)
+    new_price = _number(candidate.asking_price_cad)
+    drop_amount = round(old_price - new_price, 2)
+    return {
+        "old_price_cad": old_price,
+        "new_price_cad": new_price,
+        "price_drop_amount_cad": drop_amount,
+        "price_drop_percent": round((drop_amount / old_price) * 100, 2) if old_price > 0 else None,
+        "listing_record_id": None,
+        "latest_listing_snapshot_id": None,
+        "previous_listing_snapshot_id": None,
+    }
+
+
 def _candidate_score_threshold(session: Session, dealer_account_id: str) -> float:
     settings = session.scalar(
         select(DealerSettingsModel).where(DealerSettingsModel.dealer_account_id == dealer_account_id)
@@ -286,6 +336,14 @@ def _candidate_score_threshold(session: Session, dealer_account_id: str) -> floa
 def _number(value) -> float:
     if value is None:
         return 0.0
+    if isinstance(value, Decimal):
+        return float(value)
+    return float(value)
+
+
+def _optional_number(value) -> float | None:
+    if value is None:
+        return None
     if isinstance(value, Decimal):
         return float(value)
     return float(value)

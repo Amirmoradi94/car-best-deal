@@ -45,6 +45,8 @@ class ListingSnapshot:
     image_risk_adjustment: float = 0.0
     image_urls: tuple[str, ...] = ()
     image_risk_reasons: tuple[str, ...] = ()
+    ai_outputs: tuple[dict, ...] = ()
+    ai_risk_flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

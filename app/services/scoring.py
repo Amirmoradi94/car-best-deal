@@ -24,6 +24,10 @@ def analyze_risk(listing: ListingSnapshot, settings: DealerSettings) -> RiskAnal
         factors.append("seller_or_source_mentions_accident")
         risk_score += 12
 
+    for flag in listing.ai_risk_flags:
+        factors.append(f"ai_risk_language:{flag}")
+        risk_score += _ai_risk_flag_penalty(flag)
+
     if listing.image_risk_adjustment:
         factors.append("image_analysis_risk_adjustment")
         risk_score += abs(listing.image_risk_adjustment)
@@ -107,6 +111,17 @@ def _missing_data_penalty(listing: ListingSnapshot, settings: DealerSettings, ba
     return base * price_multiplier * tolerance_multiplier
 
 
+def _ai_risk_flag_penalty(flag: str) -> float:
+    return {
+        "accident_reported": 10,
+        "rebuilt_or_salvage": 18,
+        "as_is_sale": 12,
+        "warning_lights": 10,
+        "lien_or_finance": 8,
+        "odometer_issue": 14,
+    }.get(flag, 4)
+
+
 def _profit_potential_score(listing: ListingSnapshot, pricing: PricingAnalysis) -> float:
     if listing.asking_price_cad is None:
         return 20
@@ -171,4 +186,3 @@ def _field_confidence(value: float) -> ConfidenceLevel:
     if value >= 0.6:
         return ConfidenceLevel.MEDIUM
     return ConfidenceLevel.LOW
-

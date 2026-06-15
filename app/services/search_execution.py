@@ -10,6 +10,7 @@ from app.core.config import Settings
 from app.domain.enums import SellerType
 from app.scraping.contracts import SearchFilters
 from app.services.alerts import generate_alerts_for_search_run
+from app.services.ai_extraction import AIExtractionService
 from app.services.dealer_settings import domain_dealer_settings, get_or_create_dealer_settings
 from app.services.natural_language_search import interpret_natural_language_search
 from app.services.previsit_persistence import persist_search_run
@@ -63,6 +64,7 @@ async def execute_search_run(
     pipeline = SearchPipeline(
         settings_for_search_pipeline(settings, listing_url=payload.listing_url, vin=payload.vin),
         dealer_settings=dealer_settings,
+        ai_extractor=AIExtractionService(settings, session=session) if settings.ai_extraction_enabled else None,
     )
     try:
         if payload.listing_url:
@@ -232,6 +234,8 @@ def opportunity_payload(search_id: str, scored) -> dict:
         "image_count": len(scored.listing.image_urls),
         "image_risk_adjustment": scored.listing.image_risk_adjustment,
         "image_risk_reasons": scored.listing.image_risk_reasons,
+        "ai_outputs": scored.listing.ai_outputs,
+        "ai_risk_flags": scored.listing.ai_risk_flags,
     }
 
 

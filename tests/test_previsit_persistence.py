@@ -10,7 +10,16 @@ from sqlalchemy.pool import StaticPool
 from app.api.main import create_app
 from app.core.config import Settings, get_settings
 from app.db.base import Base
-from app.db.models import DealerSettingsModel, Search
+from app.db.models import (
+    AIModelOutput,
+    CandidateAnalysis,
+    DealerSettingsModel,
+    ImageAnalysis,
+    LienProfile,
+    Listing,
+    ListingSnapshotModel,
+    Search,
+)
 from app.db.session import get_session
 from app.scraping.contracts import SearchFilters
 from app.services.previsit_persistence import (
@@ -56,6 +65,13 @@ async def test_persist_search_run_stores_ranked_candidate_snapshots() -> None:
         assert candidates[0].hidden is False
         assert candidates[0].seller_contact_status is None
         assert candidates[0].seller_notes is None
+        assert candidates[0].pricing_summary["price_history"]["snapshot_count"] == 1
+        assert candidates[0].pricing_summary["price_history"]["current_price_cad"] == float(
+            scored_items[0].listing.asking_price_cad
+        )
+        assert candidates[0].pricing_summary["price_history"]["is_price_drop"] is False
+        assert session.query(Listing).count() == 2
+        assert session.query(ListingSnapshotModel).count() == 2
         assert list_search_runs(session)[0].id == run.id
 
 
@@ -98,6 +114,10 @@ def test_search_run_api_persists_and_returns_candidate_detail() -> None:
     assert run_body["candidate_count"] == len(run_body["ranked_opportunities"])
     assert run_body["ranked_opportunities"][0]["image_count"] > 0
     assert run_body["source_statuses"] == body["source_statuses"]
+    price_history = run_body["ranked_opportunities"][0]["pricing_summary"]["price_history"]
+    assert price_history["listing_record_id"]
+    assert price_history["latest_listing_snapshot_id"]
+    assert price_history["snapshot_count"] == 1
 
     candidate_id = run_body["ranked_opportunities"][0]["id"]
     candidate_response = client.get(f"/api/searches/runs/{run_id}/candidates/{candidate_id}")
@@ -105,10 +125,62 @@ def test_search_run_api_persists_and_returns_candidate_detail() -> None:
     assert candidate_response.json()["id"] == candidate_id
     assert candidate_response.json()["selected"] is False
     assert candidate_response.json()["hidden"] is False
+    assert candidate_response.json()["pricing_summary"]["price_history"] == price_history
 
     saved_search_response = client.get(f"/api/searches/{search_id}")
     assert saved_search_response.status_code == 200
     assert saved_search_response.json()["last_run_at"] is not None
+
+
+def test_search_run_stores_ai_comparable_outputs(tmp_path) -> None:
+    client = _test_client(object_store_root=str(tmp_path / "objects"))
+
+    response = client.post(
+        "/api/searches/run",
+        json={
+            "name": "AI comparable run",
+            "natural_language_query": "2020 Honda Civic Montreal",
+            "listing_limit": 25,
+            "sources": "autotrader",
+            "max_candidates": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    candidate = body["ranked_opportunities"][0]
+    assert candidate["ai_outputs"]
+    first_output = candidate["ai_outputs"][0]
+    assert first_output["feature"] == "comparable_relevance_ai"
+    assert first_output["model_version"] == "local-rules-v1"
+    assert first_output["schema_name"] == "comparable_relevance_ai"
+    assert first_output["schema_version"] == 1
+    assert first_output["field_confidences"]["similarity_adjustment"] == 0.65
+    assert {link["type"] for link in first_output["evidence_links"]}.issuperset(
+        {"target_listing", "comparable_listing", "ai_input_object"}
+    )
+
+    persisted = client.get(f"/api/searches/runs/{body['run_id']}").json()["ranked_opportunities"][0]
+    assert persisted["ai_outputs"][0]["id"] == candidate["ai_outputs"][0]["id"]
+    assert persisted["ai_outputs"][0]["field_confidences"] == first_output["field_confidences"]
+
+    with client.testing_session() as session:
+        outputs = session.query(AIModelOutput).all()
+        assert outputs
+        assert {output.feature for output in outputs} == {"comparable_relevance_ai"}
+        for output in outputs:
+            assert output.input_object_key.startswith("ai-model-outputs/")
+            assert output.output_object_key.startswith("ai-model-outputs/")
+            assert output.parsed_output["include"] is True
+            assert output.model == "local-rules"
+            assert output.model_version == "local-rules-v1"
+            assert output.schema_name == "comparable_relevance_ai"
+            assert output.schema_version == 1
+            assert output.validated_output["include"] is True
+            assert output.field_confidences["include"] == 0.65
+            assert {link["type"] for link in output.evidence_links}.issuperset(
+                {"target_listing", "comparable_listing", "ai_input_object"}
+            )
 
 
 def test_saved_search_api_persists_lists_and_returns_detail() -> None:
@@ -250,7 +322,7 @@ def test_saved_search_alerts_generate_in_app_and_email_dry_run_alerts() -> None:
     assert read_response.json()["read_at"] is not None
 
 
-def test_saved_search_alerts_detect_price_drop_against_previous_candidate() -> None:
+def test_saved_search_alerts_detect_price_drop_from_listing_price_history() -> None:
     client = _test_client()
 
     create_response = client.post(
@@ -276,26 +348,38 @@ def test_saved_search_alerts_detect_price_drop_against_previous_candidate() -> N
     first_run_response = client.post(f"/api/searches/{search_id}/run")
     first_run_id = first_run_response.json()["run_id"]
     first_candidate = client.get(f"/api/searches/runs/{first_run_id}").json()["ranked_opportunities"][0]
-    client.patch(
-        f"/api/searches/runs/{first_run_id}/candidates/{first_candidate['id']}",
-        json={"seller_notes": "Keep previous candidate row for price-drop comparison."},
-    )
 
-    # Raise the previous snapshot price so the next fixture run is a detected drop.
+    # Raise the persisted listing snapshot price so the next fixture run is a snapshot-history drop.
     with client.testing_session() as session:
-        candidate = get_candidate_snapshot(session, run_id=first_run_id, candidate_id=first_candidate["id"])
-        candidate.asking_price_cad = (candidate.asking_price_cad or 0) + 5000
-        session.add(candidate)
+        candidate = get_candidate_snapshot(
+            session,
+            run_id=first_run_id,
+            candidate_id=first_candidate["id"],
+        )
+        price_history = candidate.pricing_summary["price_history"]
+        snapshot = session.get(ListingSnapshotModel, price_history["latest_listing_snapshot_id"])
+        snapshot.asking_price_cad = (snapshot.asking_price_cad or 0) + 5000
+        session.add(snapshot)
         session.commit()
 
     second_run_response = client.post(f"/api/searches/{search_id}/run")
 
     assert second_run_response.status_code == 200
+    second_run_id = second_run_response.json()["run_id"]
+    second_candidate = client.get(f"/api/searches/runs/{second_run_id}").json()["ranked_opportunities"][0]
+    price_history = second_candidate["pricing_summary"]["price_history"]
+    assert price_history["snapshot_count"] == 2
+    assert price_history["is_price_drop"] is True
+    assert price_history["price_drop_amount_cad"] == 5000
     alerts = client.get("/api/alerts").json()["alerts"]
     price_drop_alert = next(alert for alert in alerts if alert["alert_type"] == "price_drop")
     assert price_drop_alert["channel"] == "in_app"
     assert price_drop_alert["status"] == "unread"
     assert price_drop_alert["metadata"]["old_price_cad"] > price_drop_alert["metadata"]["new_price_cad"]
+    assert price_drop_alert["metadata"]["price_drop_amount_cad"] == 5000
+    assert price_drop_alert["metadata"]["listing_record_id"] == price_history["listing_record_id"]
+    assert price_drop_alert["metadata"]["latest_listing_snapshot_id"] == price_history["latest_listing_snapshot_id"]
+    assert price_drop_alert["metadata"]["previous_listing_snapshot_id"] == price_history["previous_listing_snapshot_id"]
 
 
 def test_saved_search_run_without_body_uses_persisted_definition() -> None:
@@ -530,6 +614,12 @@ def test_candidate_promotion_creates_db_backed_opportunity_and_is_idempotent() -
     assert opportunity["seller_notes"] == "Seller has service records."
     assert opportunity["candidate"]["id"] == candidate_id
     assert opportunity["candidate"]["opportunity_id"] == opportunity_id
+    assert opportunity["candidate_analysis"]["status"] == "completed"
+    assert opportunity["candidate_analysis"]["latest"]["candidate_snapshot_id"] == candidate_id
+    assert opportunity["candidate_analysis"]["latest"]["selected_reason"] == "promoted_candidate"
+    assert opportunity["image_analysis"]["status"] == "completed"
+    assert opportunity["image_analysis"]["latest"]["candidate_snapshot_id"] == candidate_id
+    assert opportunity["image_analysis"]["latest"]["findings"]
 
     second_promote_response = client.post(f"/api/searches/runs/{run_id}/candidates/{candidate_id}/promote")
     assert second_promote_response.status_code == 200
@@ -543,6 +633,12 @@ def test_candidate_promotion_creates_db_backed_opportunity_and_is_idempotent() -
     assert list_response.status_code == 200
     opportunities = list_response.json()["opportunities"]
     assert [item["id"] for item in opportunities] == [opportunity_id]
+    assert opportunities[0]["candidate_analysis"]["latest"]["candidate_snapshot_id"] == candidate_id
+    assert opportunities[0]["image_analysis"]["latest"]["candidate_snapshot_id"] == candidate_id
+
+    with client.testing_session() as session:
+        assert session.query(CandidateAnalysis).filter_by(opportunity_id=opportunity_id).count() == 1
+        assert session.query(ImageAnalysis).filter_by(opportunity_id=opportunity_id).count() == 1
 
     detail_response = client.get(f"/api/opportunities/{opportunity_id}")
     assert detail_response.status_code == 200
@@ -550,6 +646,8 @@ def test_candidate_promotion_creates_db_backed_opportunity_and_is_idempotent() -
     assert detail["id"] == opportunity_id
     assert detail["candidate"]["id"] == candidate_id
     assert detail["candidate"]["source"] == "autotrader"
+    assert detail["candidate_analysis"]["latest"]["candidate_snapshot_id"] == candidate_id
+    assert detail["image_analysis"]["latest"]["risk_adjustment"] == detail["candidate"]["image_risk_adjustment"]
 
 
 def test_candidate_promotion_returns_404_for_unknown_candidate() -> None:
@@ -656,8 +754,8 @@ def test_opportunity_updates_return_404_for_unknown_opportunity() -> None:
     assert contact_response.json()["detail"] == "Opportunity not found"
 
 
-def test_opportunity_decision_report_generation_persists_versioned_report() -> None:
-    client = _test_client()
+def test_opportunity_decision_report_generation_persists_versioned_report(tmp_path) -> None:
+    client = _test_client(object_store_root=str(tmp_path / "objects"))
     opportunity = _promote_first_fixture_candidate(client, name="Report generation run")
     opportunity_id = opportunity["id"]
     checklist_response = client.patch(
@@ -683,15 +781,57 @@ def test_opportunity_decision_report_generation_persists_versioned_report() -> N
     assert first_report["report_json"]["visit_checklist"]["completed_count"] == 2
     assert first_report["report_json"]["visit_checklist"]["missing"]
     assert first_report["html_url"] == f"/api/opportunities/{opportunity_id}/reports/latest/html"
+    assert first_report["pdf_url"] == f"/api/reports/{first_report['id']}/pdf"
+    assert first_report["csv_url"] == f"/api/reports/{first_report['id']}/csv"
+    assert first_report["pdf_object_key"].endswith(".pdf")
+    assert first_report["csv_object_key"].endswith(".csv")
+    assert first_report["report_json"]["ai_report_narrative"]["narrative"]
+    assert "report_writing" in {
+        output["feature"] for output in first_report["report_json"]["evidence"]["ai_outputs"]
+    }
+    report_audit = next(
+        output
+        for output in first_report["report_json"]["evidence"]["ai_outputs"]
+        if output["feature"] == "report_writing"
+    )
+    assert report_audit["schema_name"] == "report_writing"
+    assert report_audit["field_confidences"]["narrative"] == 0.72
+    assert report_audit["evidence_links"][0]["type"] == "decision_report"
 
     latest_response = client.get(f"/api/opportunities/{opportunity_id}/reports/latest")
     assert latest_response.status_code == 200
     assert latest_response.json()["id"] == second_report["id"]
     assert latest_response.json()["version"] == 2
 
+    latest_pdf_response = client.get(f"/api/opportunities/{opportunity_id}/reports/latest/pdf")
+    latest_csv_response = client.get(f"/api/opportunities/{opportunity_id}/reports/latest/csv")
+    assert latest_pdf_response.status_code == 200
+    assert latest_pdf_response.headers["content-type"] == "application/pdf"
+    assert latest_pdf_response.content.startswith(b"%PDF")
+    assert "attachment;" in latest_pdf_response.headers["content-disposition"]
+    assert latest_csv_response.status_code == 200
+    assert "text/csv" in latest_csv_response.headers["content-type"]
+    assert "section,field,value" in latest_csv_response.text
+    assert "summary,opportunity_id" in latest_csv_response.text
+    assert "pricing,max_buy_price_cad" in latest_csv_response.text
+
     report_lookup_response = client.get(f"/api/reports/{first_report['id']}")
     assert report_lookup_response.status_code == 200
     assert report_lookup_response.json()["id"] == first_report["id"]
+
+    direct_pdf_response = client.get(f"/api/reports/{first_report['id']}/pdf")
+    direct_csv_response = client.get(f"/api/reports/{first_report['id']}/csv")
+    assert direct_pdf_response.status_code == 200
+    assert direct_pdf_response.content.startswith(b"%PDF")
+    assert direct_csv_response.status_code == 200
+    assert first_report["id"] in direct_csv_response.text
+
+    with client.testing_session() as session:
+        report_outputs = session.query(AIModelOutput).filter_by(feature="report_writing").all()
+        assert {output.subject_id for output in report_outputs} == {first_report["id"], second_report["id"]}
+        assert all(output.validated_output["narrative"] for output in report_outputs)
+        assert all(output.field_confidences["narrative"] == 0.72 for output in report_outputs)
+        assert all(output.evidence_links[0]["type"] == "decision_report" for output in report_outputs)
 
 
 def test_opportunity_decision_report_html_view_renders_latest_report() -> None:
@@ -1073,6 +1213,44 @@ def test_opportunity_history_ingestion_updates_state_and_report() -> None:
     assert "CARFAX Canada" in html_response.text
 
 
+def test_opportunity_history_ingestion_extracts_raw_text_with_ai_storage(tmp_path) -> None:
+    client = _test_client(object_store_root=str(tmp_path / "objects"))
+    opportunity = _promote_first_fixture_candidate(client, name="AI history extraction run")
+    opportunity_id = opportunity["id"]
+
+    response = client.put(
+        f"/api/opportunities/{opportunity_id}/history",
+        json={
+            "source_type": "manual",
+            "raw_payload": {
+                "document_text": "CARFAX report mentions an accident claim of $2,450 CAD and an odometer issue."
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ai_extraction"]["feature"] == "vehicle_history_extraction"
+    assert body["ai_extraction"]["schema_name"] == "vehicle_history_extraction"
+    assert body["ai_extraction"]["model_version"] == "local-rules-v1"
+    assert body["ai_extraction"]["field_confidences"]["accident_claims"] == 0.7
+    assert body["ai_extraction"]["evidence_links"][0]["type"] == "vehicle_history_text"
+    assert body["history"]["accident_claims"][0]["amount_cad"] == 2450
+    assert body["history"]["odometer_issue"] is True
+    assert body["history"]["raw_payload"]["ai_extraction"]["id"] == body["ai_extraction"]["id"]
+
+    with client.testing_session() as session:
+        output = session.query(AIModelOutput).filter_by(feature="vehicle_history_extraction").one()
+        assert output.subject_id == opportunity_id
+        assert output.parsed_output["risk_flags"] == ["accident_reported", "odometer_issue"]
+        assert output.validated_output["risk_flags"] == ["accident_reported", "odometer_issue"]
+        assert output.schema_name == "vehicle_history_extraction"
+        assert output.field_confidences["risk_flags"] == 0.7
+        assert output.evidence_links[0]["type"] == "vehicle_history_text"
+        assert output.input_object_key.startswith("ai-model-outputs/")
+        assert output.output_object_key.startswith("ai-model-outputs/")
+
+
 def test_opportunity_history_routes_return_404_for_unknown_opportunity() -> None:
     client = _test_client()
 
@@ -1141,11 +1319,23 @@ def test_opportunity_title_evidence_manual_clear_updates_state_and_report() -> N
     assert "lien_verification" not in updated["missing_key_data"]
     assert updated["latest_report"]["status"] == "stale"
     assert updated["title_evidence"]["latest"]["title_clearance_status"] == "clear"
+    assert updated["lien_profile"]["status"] == "clear"
+    assert updated["lien_profile"]["latest"]["title_evidence_id"] == evidence["id"]
+    assert updated["lien_profile"]["latest"]["verified"] is True
 
     list_response = client.get(f"/api/opportunities/{opportunity_id}/title-evidence")
     assert list_response.status_code == 200
     assert list_response.json()["status"] == "clear"
     assert list_response.json()["count"] == 1
+
+    detail_response = client.get(f"/api/opportunities/{opportunity_id}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()["lien_profile"]["latest"]["title_evidence_id"] == evidence["id"]
+    with client.testing_session() as session:
+        profile = session.query(LienProfile).filter_by(opportunity_id=opportunity_id).one()
+        assert profile.title_evidence_id == evidence["id"]
+        assert profile.lien_status == "clear"
+        assert profile.verified is True
 
     fresh_report_response = client.post(f"/api/opportunities/{opportunity_id}/reports")
     assert fresh_report_response.status_code == 200
@@ -1193,6 +1383,10 @@ def test_opportunity_title_evidence_lien_found_tracks_payout_and_keeps_blocker()
     assert updated["title_evidence"]["latest"]["lienholder_name"] == "Example Credit Union"
     assert updated["title_evidence"]["latest"]["payout_amount_cad"] == 7050
     assert updated["title_evidence"]["latest"]["payout_status"] == "requested"
+    assert updated["lien_profile"]["status"] == "payout_pending"
+    assert updated["lien_profile"]["latest"]["lienholder_name"] == "Example Credit Union"
+    assert updated["lien_profile"]["latest"]["payout_amount_cad"] == 7050
+    assert updated["lien_profile"]["latest"]["verified"] is False
 
     report_response = client.post(f"/api/opportunities/{opportunity_id}/reports")
     assert report_response.status_code == 200
@@ -1593,16 +1787,26 @@ def test_opportunity_decision_report_routes_return_404_for_missing_records() -> 
 
     latest_response = client.get(f"/api/opportunities/{opportunity_id}/reports/latest")
     html_response = client.get(f"/api/opportunities/{opportunity_id}/reports/latest/html")
+    pdf_response = client.get(f"/api/opportunities/{opportunity_id}/reports/latest/pdf")
+    csv_response = client.get(f"/api/opportunities/{opportunity_id}/reports/latest/csv")
     missing_opportunity_response = client.post("/api/opportunities/missing-opportunity/reports")
     missing_report_response = client.get("/api/reports/missing-report")
+    missing_pdf_response = client.get("/api/reports/missing-report/pdf")
+    missing_csv_response = client.get("/api/reports/missing-report/csv")
 
     assert latest_response.status_code == 404
     assert latest_response.json()["detail"] == "Decision report not found"
     assert html_response.status_code == 404
     assert html_response.json()["detail"] == "Decision report not found"
+    assert pdf_response.status_code == 404
+    assert pdf_response.json()["detail"] == "Decision report not found"
+    assert csv_response.status_code == 404
+    assert csv_response.json()["detail"] == "Decision report not found"
     assert missing_opportunity_response.status_code == 404
     assert missing_opportunity_response.json()["detail"] == "Opportunity not found"
     assert missing_report_response.status_code == 404
+    assert missing_pdf_response.status_code == 404
+    assert missing_csv_response.status_code == 404
     assert missing_report_response.json()["detail"] == "Decision report not found"
 
 

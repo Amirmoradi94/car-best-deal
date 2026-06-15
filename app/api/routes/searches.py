@@ -14,6 +14,12 @@ from app.services.previsit_persistence import (
     list_search_runs,
     update_candidate_workflow_state,
 )
+from app.services.candidate_analysis import (
+    candidate_analysis_summary_payload,
+    image_analysis_summary_payload,
+    latest_candidate_analysis,
+    latest_image_analysis,
+)
 from app.services.opportunity_promotion import opportunity_payload, promote_candidate_to_opportunity
 from app.services.saved_searches import (
     create_saved_search,
@@ -290,7 +296,12 @@ def promote_run_candidate(
     if result is None:
         raise HTTPException(status_code=404, detail="Candidate snapshot not found")
     opportunity, candidate = result
-    return opportunity_payload(opportunity, candidate)
+    response = opportunity_payload(opportunity, candidate)
+    response["candidate_analysis"] = candidate_analysis_summary_payload(
+        latest_candidate_analysis(session, opportunity.id)
+    )
+    response["image_analysis"] = image_analysis_summary_payload(latest_image_analysis(session, opportunity.id))
+    return response
 
 
 @router.patch("/{search_id}")
@@ -420,6 +431,8 @@ def _candidate_payload(candidate) -> dict:
         "image_urls": candidate.image_urls,
         "image_risk_adjustment": _json_number(candidate.image_risk_adjustment),
         "image_risk_reasons": candidate.image_risk_reasons,
+        "ai_outputs": candidate.ai_outputs,
+        "ai_risk_flags": risk.get("ai_risk_flags", []),
         "confidence_by_section": candidate.confidence_by_section,
         "selected": candidate.selected,
         "hidden": candidate.hidden,

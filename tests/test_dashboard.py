@@ -43,6 +43,7 @@ def test_dashboard_static_assets_are_available() -> None:
     assert "renderInterpretation" in script_response.text
     assert "loadAlerts" in script_response.text
     assert "markAlertRead" in script_response.text
+    assert "alertPriceLabel" in script_response.text
     assert "loadSettings" in script_response.text
     assert "saveSettings" in script_response.text
     assert "promoteCandidate" in script_response.text
@@ -50,6 +51,9 @@ def test_dashboard_static_assets_are_available() -> None:
     assert "diagnosticPills" in script_response.text
     assert "submitOpportunityFeedback" in script_response.text
     assert "renderPilotFeedbackSummary" in script_response.text
+    assert "downloadLatestOpportunityReport" in script_response.text
+    assert "data-download-opportunity-report-pdf" in script_response.text
+    assert "data-download-opportunity-report-csv" in script_response.text
     assert "uploadOpportunityDocument" in script_response.text
     assert "documentTypeOptions" in script_response.text
     assert "submitTitleEvidence" in script_response.text
@@ -66,6 +70,7 @@ def test_dashboard_static_assets_are_available() -> None:
     assert "loadOpportunityComparables" in script_response.text
     assert "removeComparable" in script_response.text
     assert "comparableEditorHtml" in script_response.text
+    assert "priceHistoryHtml" in script_response.text
     assert style_response.status_code == 200
     assert ".opportunity-card" in style_response.text
     assert ".settings-panel" in style_response.text
@@ -140,6 +145,8 @@ def test_dashboard_search_api_contract_includes_rendered_fields() -> None:
     ]:
         assert field in candidate
 
+    assert "price_history" in candidate["pricing_summary"]
+    assert candidate["pricing_summary"]["price_history"]["latest_listing_snapshot_id"]
     assert run_body["source_statuses"]
     assert all("source_name" in status for status in run_body["source_statuses"])
     assert all("diagnostics" in status for status in run_body["source_statuses"])
