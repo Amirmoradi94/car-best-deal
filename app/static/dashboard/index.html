@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Car Dealer Opportunity Finder</title>
+    <link rel="stylesheet" href="/dashboard/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="search-panel" aria-label="Search controls">
+        <div class="brand-block">
+          <p class="eyebrow">Acquisition desk</p>
+          <h1>Opportunity Finder</h1>
+        </div>
+
+        <details class="settings-panel" open>
+          <summary>
+            <span>Dealer settings</span>
+            <button id="save-settings" type="button" class="secondary">Save</button>
+          </summary>
+          <div class="form-grid settings-grid">
+            <label class="field">
+              <span>Target profit</span>
+              <input id="setting_target_profit_cad" inputmode="numeric" />
+            </label>
+            <label class="field">
+              <span>Risk</span>
+              <select id="setting_risk_tolerance">
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+            <label class="field field-wide">
+              <span>Brands</span>
+              <input id="setting_preferred_brands" autocomplete="off" />
+            </label>
+            <label class="field field-wide">
+              <span>Models</span>
+              <input id="setting_preferred_models" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Default radius</span>
+              <input id="setting_default_search_radius_km" inputmode="numeric" />
+            </label>
+            <label class="field">
+              <span>Alert score</span>
+              <input id="setting_candidate_score_threshold" inputmode="decimal" />
+            </label>
+            <label class="field">
+              <span>Candidate cap</span>
+              <input id="setting_max_candidate_count" inputmode="numeric" />
+            </label>
+            <label class="field">
+              <span>Image cap</span>
+              <input id="setting_max_images_per_candidate" inputmode="numeric" />
+            </label>
+            <label class="toggle field-wide">
+              <input id="setting_include_overpriced_default" type="checkbox" />
+              <span>Show overpriced by default</span>
+            </label>
+          </div>
+        </details>
+
+        <form id="search-form" class="form-grid">
+          <label class="field field-wide">
+            <span>Run name</span>
+            <input id="name" name="name" value="Civic shortlist" autocomplete="off" />
+          </label>
+
+          <label class="field field-wide">
+            <span>Natural query</span>
+            <input id="natural_language_query" name="natural_language_query" value="2020 Honda Civic Montreal" autocomplete="off" />
+          </label>
+
+          <label class="field">
+            <span>Make</span>
+            <input id="make" name="make" value="Honda" autocomplete="off" />
+          </label>
+
+          <label class="field">
+            <span>Model</span>
+            <input id="model" name="model" value="Civic" autocomplete="off" />
+          </label>
+
+          <label class="field">
+            <span>Year min</span>
+            <input id="year_min" name="year_min" value="2020" inputmode="numeric" />
+          </label>
+
+          <label class="field">
+            <span>Year max</span>
+            <input id="year_max" name="year_max" inputmode="numeric" />
+          </label>
+
+          <label class="field">
+            <span>Max price</span>
+            <input id="price_max_cad" name="price_max_cad" inputmode="numeric" />
+          </label>
+
+          <label class="field">
+            <span>Max km</span>
+            <input id="mileage_max_km" name="mileage_max_km" inputmode="numeric" />
+          </label>
+
+          <label class="field">
+            <span>City</span>
+            <input id="location_city" name="location_city" value="Montreal" autocomplete="off" />
+          </label>
+
+          <label class="field">
+            <span>Province</span>
+            <input id="location_province" name="location_province" value="QC" autocomplete="off" maxlength="2" />
+          </label>
+
+          <label class="field">
+            <span>Radius km</span>
+            <input id="radius_km" name="radius_km" value="50" inputmode="numeric" />
+          </label>
+
+          <label class="field">
+            <span>Listing limit</span>
+            <input id="listing_limit" name="listing_limit" value="25" inputmode="numeric" />
+          </label>
+
+          <label class="field">
+            <span>Sources</span>
+            <select id="sources" name="sources">
+              <option value="both">Both</option>
+              <option value="kijiji">Kijiji</option>
+              <option value="autotrader">AutoTrader</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Candidates</span>
+            <input id="max_candidates" name="max_candidates" value="10" inputmode="numeric" />
+          </label>
+
+          <label class="toggle field-wide">
+            <input id="scheduled" name="scheduled" type="checkbox" />
+            <span>Scheduled refresh</span>
+          </label>
+
+          <label class="toggle field-wide">
+            <input id="alerts_enabled" name="alerts_enabled" type="checkbox" />
+            <span>Alerts</span>
+          </label>
+
+          <label class="toggle">
+            <input id="in_app_alerts_enabled" name="in_app_alerts_enabled" type="checkbox" checked />
+            <span>In-app</span>
+          </label>
+
+          <label class="toggle">
+            <input id="email_alerts_enabled" name="email_alerts_enabled" type="checkbox" />
+            <span>Email</span>
+          </label>
+
+          <label class="field">
+            <span>Frequency</span>
+            <select id="schedule_cron" name="schedule_cron">
+              <option value="daily">Daily</option>
+              <option value="hourly">Hourly</option>
+              <option value="every:30minutes">Every 30 min</option>
+              <option value="every:6hours">Every 6 hr</option>
+            </select>
+          </label>
+
+          <label class="field field-wide">
+            <span>Listing URL</span>
+            <input id="listing_url" name="listing_url" autocomplete="off" />
+          </label>
+
+          <label class="field field-wide">
+            <span>VIN</span>
+            <input id="vin" name="vin" autocomplete="off" maxlength="17" />
+          </label>
+
+          <div class="form-actions">
+            <button id="run-search" type="submit">Run Search</button>
+            <button id="interpret-search" type="button" class="secondary">Interpret</button>
+            <button id="analyze-promote-listing" type="button">Analyze + Promote</button>
+            <button id="save-search" type="button" class="secondary">Save</button>
+            <button id="reset-form" type="button" class="secondary">Reset</button>
+          </div>
+        </form>
+
+        <section id="interpreted-filters" class="interpreted-filters" aria-live="polite"></section>
+      </aside>
+
+      <main class="workspace">
+        <section class="toolbar" aria-label="Dashboard status">
+          <div>
+            <p class="eyebrow">Ranked opportunities</p>
+            <h2 id="result-heading">No run loaded</h2>
+          </div>
+          <label class="toggle">
+            <input id="show-overpriced" type="checkbox" checked />
+            <span>Show overpriced</span>
+          </label>
+          <label class="toggle">
+            <input id="show-hidden" type="checkbox" />
+            <span>Show hidden</span>
+          </label>
+        </section>
+
+        <section id="alert-region" class="alert-region" aria-live="polite"></section>
+
+        <section class="summary-row" aria-label="Run summary">
+          <div class="metric">
+            <span>Candidates</span>
+            <strong id="metric-candidates">0</strong>
+          </div>
+          <div class="metric">
+            <span>Average score</span>
+            <strong id="metric-score">-</strong>
+          </div>
+          <div class="metric">
+            <span>Best max buy</span>
+            <strong id="metric-max-buy">-</strong>
+          </div>
+          <div class="metric">
+            <span>Sources</span>
+            <strong id="metric-sources">-</strong>
+          </div>
+        </section>
+
+        <section id="source-status-panel" class="source-status-panel" aria-label="Source status"></section>
+
+        <section class="content-grid">
+          <div class="list-panel">
+            <div id="opportunity-list" class="opportunity-list" aria-live="polite"></div>
+          </div>
+
+          <aside class="detail-panel" aria-label="Candidate details">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Candidate</p>
+                <h2 id="detail-title">Select a candidate</h2>
+              </div>
+              <a id="detail-source-link" class="source-link hidden" href="#" target="_blank" rel="noreferrer">Open source</a>
+            </div>
+            <div id="candidate-detail" class="candidate-detail empty-state">
+              <p>Candidate pricing, risk, image, and confidence details will appear here.</p>
+            </div>
+          </aside>
+        </section>
+      </main>
+
+      <aside class="history-panel" aria-label="Run history">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Inbox</p>
+            <h2>Alerts</h2>
+          </div>
+          <button id="refresh-alerts" type="button" class="icon-button" title="Refresh alerts" aria-label="Refresh alerts">Refresh</button>
+        </div>
+        <div id="alerts" class="alert-list" aria-live="polite"></div>
+
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Pilot review</p>
+            <h2>Feedback</h2>
+          </div>
+        </div>
+        <div id="pilot-feedback-summary" class="pilot-feedback-summary" aria-live="polite"></div>
+
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Promoted</p>
+            <h2>Opportunities</h2>
+          </div>
+          <button id="refresh-opportunities" type="button" class="icon-button" title="Refresh opportunities" aria-label="Refresh opportunities">Refresh</button>
+        </div>
+        <div id="opportunities" class="opportunity-rail-list" aria-live="polite"></div>
+
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Saved searches</p>
+            <h2>Searches</h2>
+          </div>
+          <button id="refresh-saved-searches" type="button" class="icon-button" title="Refresh saved searches" aria-label="Refresh saved searches">Refresh</button>
+        </div>
+        <div id="saved-searches" class="saved-search-list" aria-live="polite"></div>
+
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Persisted runs</p>
+            <h2>History</h2>
+          </div>
+          <button id="refresh-history" type="button" class="icon-button" title="Refresh history" aria-label="Refresh history">Refresh</button>
+        </div>
+        <div id="run-history" class="run-history" aria-live="polite"></div>
+      </aside>
+    </div>
+
+    <script src="/dashboard/app.js" defer></script>
+  </body>
+</html>

@@ -43,6 +43,8 @@ class ListingSnapshot:
     has_lien_verification: bool = False
     has_image_risk: bool = False
     image_risk_adjustment: float = 0.0
+    image_urls: tuple[str, ...] = ()
+    image_risk_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -103,4 +105,5 @@ class ScoredOpportunity:
     is_overpriced: bool
     relevance_score: float = 1.0
     relevance_reasons: tuple[str, ...] = ()
+    comparables: tuple[ComparableListing, ...] = ()
     confidence_by_section: dict[str, ConfidenceLevel] = field(default_factory=dict)
